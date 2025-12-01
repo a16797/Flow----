@@ -268,19 +268,12 @@ class FlowBatchPilot {
 
   sortFilesByName(files) {
     return files.sort((a, b) => {
-      // Extract numerical part from filename for proper sorting
-      const extractNumber = (filename) => {
-        // 优先匹配 _PT_ 或 _pt_ 后面的数字（用于 [1]_PT_10_... 格式）
-        const ptMatch = filename.match(/_PT_(\d+)/i);
-        if (ptMatch) {
-          return parseInt(ptMatch[1], 10);
-        }
-        // 如果没有找到 _PT_，则匹配第一个数字序列
-        const match = filename.match(/(\d+)/);
-        return match ? parseInt(match[1], 10) : 0;
-      };
-
-      return extractNumber(a.name) - extractNumber(b.name);
+      // 使用自然排序：把数字当作数字来比较，而不是字符串
+      // 和操作系统文件管理器的排序行为一致
+      return a.name.localeCompare(b.name, undefined, {
+        numeric: true,      // 数字感知排序
+        sensitivity: 'base' // 忽略大小写
+      });
     });
   }
 
