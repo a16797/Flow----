@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Grok 批量视频</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <h1>Grok 批量视频</h1>
+  <section>
+    <label>选择图片 (按顺序对应提示词): <input id="fileInput" type="file" multiple accept="image/*" /></label>
+  </section>
+  <section>
+    <label>多行提示词 (一行对应一张图片):</label>
+    <textarea id="prompts" placeholder="每行一个提示词"></textarea>
+  </section>
+  <section class="row">
+    <label>生成超时(秒): <input id="genTimeout" type="number" min="5" value="15" /></label>
+    <label>最大导航等待(秒): <input id="navTimeout" type="number" min="5" value="20" /></label>
+  </section>
+  <section class="row">
+    <button id="startBtn">开始</button>
+    <button id="pauseBtn" disabled>暂停</button>
+    <button id="resumeBtn" disabled>继续</button>
+  </section>
+  <section>
+    <label>代理设置:</label>
+    <input id="proxyInput" type="text" placeholder="socks5h://127.0.0.1:10809" />
+    <button id="setProxyBtn">设置代理</button>
+    <button id="clearProxyBtn">清除代理</button>
+    <div id="proxyStatus"></div>
+  </section>
+  <section class="row">
+    <button id="openDownloaderBtn">打开视频下载器</button>
+  </section>
+  <section>
+    <label><input type="checkbox" id="autoScroll" checked /> 页面跳转后自动滚动定位</label>
+  </section>
+  <section>
+    <div id="status">待命</div>
+    <progress id="progress" value="0" max="0"></progress>
+  </section>
+  <section>
+    <h3>日志</h3>
+    <pre id="log"></pre>
+    <button id="exportLogBtn">导出日志</button>
+  </section>
+  <script src="popup.js"></script>
+</body>
+</html>

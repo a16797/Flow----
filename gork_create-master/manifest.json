@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Grok 批量视频提交助手",
+  "description": "在 grok.com/imagine 页面批量上传图片并生成视频，支持多行提示词映射。",
+  "version": "0.1.0",
+  
+  "permissions": ["activeTab", "scripting", "storage", "clipboardWrite", "downloads", "proxy"],
+  "host_permissions": ["https://grok.com/*", "https://assets.grok.com/*"],
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_title": "Grok 批量视频"
+  },
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://grok.com/imagine*"],
+      "js": ["src/contentScript.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://grok.com/*"],
+      "js": ["src/downloadContent.js"],
+      "css": ["src/download.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*"],
+      "matches": ["https://grok.com/*"]
+    }
+  ]
+}
