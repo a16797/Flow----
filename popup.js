@@ -792,11 +792,8 @@ class FlowBatchPilot {
     // Auto-scroll to bottom
     this.logContainer.scrollTop = this.logContainer.scrollHeight;
 
-    // Limit log entries to prevent memory issues
-    const entries = this.logContainer.querySelectorAll('.log-entry');
-    if (entries.length > 50) {
-      entries[0].remove();
-    }
+    // 保留所有日志记录，不删除历史日志
+    // （用户需求：查看完整操作记录）
 
     console.log(`[FlowBatchPilot] ${message}`);
   }
