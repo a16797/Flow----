@@ -2613,7 +2613,7 @@ class FlowBatchContentScript {
     }, 100);
   }
 
-  // 下载选中的视频
+  // 下载选中的视频（倒序编号）
   async downloadSelectedVideos() {
     if (!this.downloadPanel) return;
 
@@ -2621,37 +2621,54 @@ class FlowBatchContentScript {
     const nameInputs = this.downloadPanel.querySelectorAll('.flow-video-name-input');
     const prefix = (this.downloadPanel.querySelector('#flow-batch-prefix')?.value || '').trim();
 
-    let selectedCount = 0;
-    const downloadPromises = [];
-
+    // 第一步：收集所有选中的视频
+    const selectedItems = [];
     checkboxes.forEach((checkbox, index) => {
       if (checkbox.checked) {
         const item = this.videoItems[index];
         const baseName = (nameInputs[index].value || item.name).replace(/\.+$/, '');
-        const filename = `${prefix ? prefix + '_' : ''}${baseName}.mp4`;
-
-        downloadPromises.push(
-          chrome.runtime.sendMessage({
-            action: 'downloadVideo',
-            url: item.videoUrl,
-            filename: filename
-          }).catch(error => {
-            console.error(`下载视频失败: ${filename}`, error);
-          })
-        );
-
-        selectedCount++;
+        selectedItems.push({
+          item,
+          baseName,
+          originalIndex: index
+        });
       }
     });
 
-    if (selectedCount === 0) {
+    if (selectedItems.length === 0) {
       alert('请至少选择一个视频');
-    } else {
-      await Promise.all(downloadPromises);
-      alert(`已开始下载 ${selectedCount} 个视频`);
-      this.downloadPanel?.remove();
-      this.downloadPanel = null;
+      return;
     }
+
+    // 第二步：按照倒序编号分配编号（总数 -> 1）
+    const totalSelected = selectedItems.length;
+    const downloadPromises = [];
+
+    selectedItems.forEach((selected, selectionIndex) => {
+      // 倒序编号：第1个选中 -> 编号最大(totalSelected)，最后一个 -> 编号1
+      const reverseNumber = totalSelected - selectionIndex;
+
+      // 构建文件名：编号-原始名称
+      const filename = `${prefix ? prefix + '_' : ''}${reverseNumber}-${selected.baseName}.mp4`;
+
+      this.log(`准备下载: ${filename} (选择顺序: ${selectionIndex + 1}/${totalSelected}, 倒序编号: ${reverseNumber})`, 'info');
+
+      downloadPromises.push(
+        chrome.runtime.sendMessage({
+          action: 'downloadVideo',
+          url: selected.item.videoUrl,
+          filename: filename
+        }).catch(error => {
+          console.error(`下载视频失败: ${filename}`, error);
+        })
+      );
+    });
+
+    // 第三步：开始下载
+    await Promise.all(downloadPromises);
+    alert(`已开始下载 ${totalSelected} 个视频（按倒序编号）`);
+    this.downloadPanel?.remove();
+    this.downloadPanel = null;
   }
 
   // ===============================
