@@ -27,7 +27,7 @@ class FlowBatchContentScript {
     QUEUE_CAPACITY_TIMEOUT: 120 * 1000, // 2 minutes max wait for queue space
     QUEUE_THROTTLE_DELAY: 40 * 1000,    // wait 40s before re-checking when full
     TASK_DELAY: 12000,                  // ms between tasks (12 seconds)
-    VIDEO_GENERATION_TIMEOUT: 80 * 1000, // 80 seconds video generation timeout
+    VIDEO_GENERATION_TIMEOUT: 200 * 1000, // 200 seconds (3min 20s) - Flow videos take 120-180s to generate
     VIDEO_LOAD_TIMEOUT: 6 * 1000,       // 6 seconds for video load check
     ELEMENT_WAIT_INTERVAL: 1000,        // ms between element checks
     CLICK_DELAY: 400,                   // ms after click
@@ -1855,6 +1855,14 @@ class FlowBatchContentScript {
 
     while (Date.now() - startTime < maxWait) {
       attempts++;
+
+      // Progress logging (every 15 seconds = 15 attempts)
+      if (attempts % 15 === 0) {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+        const remaining = ((maxWait - (Date.now() - startTime)) / 1000).toFixed(0);
+        this.log(`⏳ 等待视频生成... 已等待${elapsed}秒，剩余${remaining}秒`, 'info');
+        this.logToPopup(`⏳ 任务 ${targetIndex + 1} 生成中... (${elapsed}s/${(maxWait / 1000).toFixed(0)}s)`, 'info');
+      }
 
       // CRITICAL FIX: Check pause status during waiting
       const currentState = await this.loadQueueState();
