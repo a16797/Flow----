@@ -1871,9 +1871,48 @@ class FlowBatchContentScript {
         return null;
       }
 
-      // 查找所有结果卡片
-      const cards = container.querySelectorAll('div[data-result-index]');
+      // 查找所有结果卡片（使用正确的选择器）
+      let cards = Array.from(container.querySelectorAll('div[data-index]'));
+
+      // 过滤掉日期分隔符等非视频元素
+      cards = cards.filter(card => {
+        const hasVideo = card.querySelector('video') !== null;
+        const hasProgress = /\d+%/.test(card.textContent);
+        const hasCardClass = card.querySelector('.sc-95642653-0, .sc-20145656-0') !== null;
+        return hasVideo || hasProgress || hasCardClass;
+      });
+
+      // 如果找到卡片，记录日志
+      if (cards.length > 0 && attempts === 1) {
+        this.log(`✅ 找到 ${cards.length} 个视频卡片（data-index）`, 'success');
+      }
+
+      // 降级策略1: 直接查找video父元素
       if (cards.length === 0) {
+        const videoDivs = container.querySelectorAll('div:has(video)');
+        if (videoDivs.length > 0) {
+          cards = Array.from(videoDivs);
+          this.log(`⚠️ 使用降级策略: div:has(video) (${cards.length}个)`, 'warning');
+        }
+      }
+
+      // 降级策略2: 查找进度文本
+      if (cards.length === 0) {
+        const allDivs = Array.from(container.querySelectorAll('div'));
+        cards = allDivs.filter(div => {
+          const text = div.textContent.trim();
+          return /^\d+%$/.test(text) && div.offsetHeight > 50;
+        }).map(div => div.closest('div[data-index]')).filter(Boolean);
+
+        if (cards.length > 0) {
+          this.log(`⚠️ 使用降级策略: 进度文本 (${cards.length}个)`, 'warning');
+        }
+      }
+
+      if (cards.length === 0) {
+        if (attempts % 10 === 0) {
+          this.log(`⚠️ 未检测到视频卡片，继续等待... (已尝试${attempts}次)`, 'warning');
+        }
         await this.sleep(1000);
         continue;
       }
