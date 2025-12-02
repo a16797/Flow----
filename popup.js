@@ -417,12 +417,37 @@ class FlowBatchPilot {
       let fileEntry = cacheKey ? await this.getStoredFileEntry(queueId, fileIndex) : null;
 
       if (!fileEntry) {
+        // Enhanced validation with detailed error
+        if (!this.currentFiles || this.currentFiles.length === 0) {
+          safeSendResponse({
+            ok: false,
+            error: `没有可用文件。请先选择文件。请求索引: ${fileIndex}`
+          });
+          return;
+        }
+
+        if (fileIndex < 0) {
+          safeSendResponse({
+            ok: false,
+            error: `文件索引不能为负数。请求索引: ${fileIndex}`
+          });
+          return;
+        }
+
+        if (fileIndex >= this.currentFiles.length) {
+          safeSendResponse({
+            ok: false,
+            error: `文件索引超出范围。请求索引: ${fileIndex}，可用文件: ${this.currentFiles.length} 个 (索引 0-${this.currentFiles.length - 1})`
+          });
+          return;
+        }
+
         const file = this.currentFiles[fileIndex];
 
         if (!file) {
           safeSendResponse({
             ok: false,
-            error: `无效的文件索引: ${fileIndex}`
+            error: `文件索引 ${fileIndex} 处没有文件对象，可用文件: ${this.currentFiles.length} 个`
           });
           return;
         }

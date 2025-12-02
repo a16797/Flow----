@@ -533,7 +533,13 @@ class FlowBatchContentScript {
         return;
       }
 
-      // CRITICAL FIX: Request file with validated index
+      // CRITICAL FIX: Validate file index before requesting
+      // Check if we have a file for this task index
+      const hasFileForTask = taskIndex < this.metadata.filenameList.length;
+      if (!hasFileForTask) {
+        throw new Error(`No file available for task index ${taskIndex}. Files available: 0-${this.metadata.filenameList.length - 1}`);
+      }
+
       this.log(`Requesting file for task index ${taskIndex}: ${filename}`, 'info');
       const fileData = await this.requestFileData(taskIndex);
 
@@ -3473,6 +3479,17 @@ class FlowBatchContentScript {
 
       if (!metadata.flowBatchTaskMetadata || !metadata.flowBatchTaskMetadata.promptList) {
         this.log('Queue state found but metadata missing - clearing corrupted state', 'warning');
+        // 清除损坏的状态
+        await chrome.storage.local.remove(['flowBatchQueueState', 'flowBatchTaskMetadata']);
+        return;
+      }
+
+      // CRITICAL FIX: Validate metadata integrity
+      const taskMetadata = metadata.flowBatchTaskMetadata;
+      if (taskMetadata.promptList.length !== taskMetadata.totalTasks ||
+          taskMetadata.filenameList.length !== taskMetadata.totalTasks) {
+        this.log(`Queue metadata corruption detected - prompts: ${taskMetadata.promptList.length}, filenames: ${taskMetadata.filenameList.length}, totalTasks: ${taskMetadata.totalTasks}`, 'error');
+        this.logToPopup('检测到队列元数据损坏，已自动清除', 'error');
         // 清除损坏的状态
         await chrome.storage.local.remove(['flowBatchQueueState', 'flowBatchTaskMetadata']);
         return;
