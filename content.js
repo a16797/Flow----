@@ -2740,8 +2740,7 @@ class FlowBatchContentScript {
         const promptEl = container.querySelector('div[class*="eVxyTT"]');
         if (promptEl) {
           let prompt = promptEl.textContent.trim();
-          // 清理提示词：移除开头的数字序号
-          prompt = prompt.replace(/^\d+\s+/, '');
+          // 保留提示词：包括开头的数字序号
           return prompt;
         }
       }
@@ -2766,7 +2765,7 @@ class FlowBatchContentScript {
 
       if (closestPrompt) {
         let prompt = closestPrompt.textContent.trim();
-        prompt = prompt.replace(/^\d+\s+/, '');
+        // 保留提示词：包括开头的数字序号
         return prompt;
       }
 
@@ -2784,7 +2783,7 @@ class FlowBatchContentScript {
 
         if (result) {
           let prompt = result.textContent.trim();
-          prompt = prompt.replace(/^\d+\s+/, '');
+          // 保留提示词：包括开头的数字序号
           return prompt;
         }
       }
@@ -2800,11 +2799,10 @@ class FlowBatchContentScript {
   generatePromptPrefix(prompt) {
     if (!prompt) return null;
 
-    // 移除特殊符号和空格，保留中英文和数字
+    // 移除特殊符号和空格，保留中英文和数字（包括开头的数字序号）
     const cleaned = prompt
       .replace(/[\/:*?"<>|]/g, '') // 移除Windows文件名不允许的字符
       .replace(/\s+/g, ' ')        // 多个空格合并为一个
-      .replace(/^\d+\s*/, '')      // 移除开头的数字
       .trim();
 
     if (!cleaned) return null;
