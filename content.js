@@ -27,7 +27,7 @@ class FlowBatchContentScript {
     QUEUE_CAPACITY_TIMEOUT: 120 * 1000, // 2 minutes max wait for queue space
     QUEUE_THROTTLE_DELAY: 60 * 1000,    // wait 60s before re-checking when full
     TASK_DELAY: 300,                  // ms between tasks
-    VIDEO_GENERATION_TIMEOUT: 90 * 1000, // 90 seconds
+    VIDEO_GENERATION_TIMEOUT: 200 * 1000, // 200 seconds
     VIDEO_LOAD_TIMEOUT: 5 * 1000,       // 5 seconds for video load check
     ELEMENT_WAIT_INTERVAL: 200,        // ms between element checks
     CLICK_DELAY: 200,                   // ms after click
@@ -36,7 +36,9 @@ class FlowBatchContentScript {
     // === Rate Limit and Error Detection (OPTIMIZED) ===
     ERROR_POLL_INTERVAL: 1000,          // ms between error detection polls (1 second)
     ERROR_POLL_MAX_ATTEMPTS: 5,         // max error detection attempts (5s total)
-    RATE_LIMIT_RETRY_DELAY: 10000,      // 10 seconds delay before retrying on rate limit
+    RATE_LIMIT_RETRY_DELAY: 60000,      // 60 seconds delay before retrying on rate limit
+    SERVER_OVERLOAD_RETRY_DELAY: 60000, // 60 seconds delay before retrying on server overload
+    POLICY_VIOLATION_RETRY_DELAY: 5000, // 5 seconds delay before retrying on policy violation (false positives)
     VIDEO_SRC_LOAD_WAIT: 5000,          // 5 seconds wait for video src to load
   };
 
@@ -333,6 +335,14 @@ class FlowBatchContentScript {
           this.log('Queue completed', 'success');
           this.logToPopup('队列处理完成', 'success');
 
+          // 更新悬浮球显示完成状态
+          this.updateFloatingBallStatus('✓', 'success');
+
+          // 3秒后恢复默认状态
+          setTimeout(() => {
+            this.updateFloatingBallStatus('Flow', 'normal');
+          }, 3000);
+
           // CRITICAL: Always reset both memory and storage state
           this.queueRunning = false;
           this.currentTaskPointer = state.totalTasks || 0;
@@ -409,7 +419,7 @@ class FlowBatchContentScript {
           }
 
           const currentRetryCount = state.retryCounters[currentTaskIndex] || 0;
-          const maxRetries = 3;
+          const maxRetries = 5;  // Increased from 3 to handle stricter rate limiting
 
           if (currentRetryCount < maxRetries) {
             // Still have retry chances
@@ -423,12 +433,18 @@ class FlowBatchContentScript {
             this.log(`任务 ${currentTaskIndex + 1} 第 ${newRetryCount} 次重试 (剩余 ${remainingRetries} 次机会): ${error.message}`, 'warning');
             this.logToPopup(`⏸️ 任务 ${currentTaskIndex + 1} 第 ${newRetryCount} 次重试 (剩余 ${remainingRetries} 次机会)`, 'warning');
 
+            // 更新悬浮球显示重试状态
+            this.updateFloatingBallStatus(`R${newRetryCount}`, 'retry');
+
             // Don't increment currentIndex, next loop will retry the same task
             continue;
           } else {
             // Exceeded max retries, mark as failed and move to next task
             this.log(`❌ 任务 ${currentTaskIndex + 1} 已重试 ${maxRetries} 次，标记为失败`, 'error');
             this.logToPopup(`❌ 任务 ${currentTaskIndex + 1} 重试次数已达上限 (${maxRetries} 次)，跳过该任务`, 'error');
+
+            // 更新悬浮球显示失败状态
+            this.updateFloatingBallStatus('Fail', 'error');
 
             // Clear retry counter for this task
             delete state.retryCounters[currentTaskIndex];
@@ -1742,6 +1758,15 @@ class FlowBatchContentScript {
 
         // Throw RetryTaskError to signal that this task should be retried
         throw new RetryTaskError(`Rate limit detected: ${errorMessage}`);
+      } else if (errorType === 'server_overload') {
+        this.log(`⚠️ 检测到服务器过载错误: ${errorMessage}`, 'warning');
+        this.logToPopup(`⏸️ 服务器繁忙，等待${FlowBatchContentScript.CONFIG.SERVER_OVERLOAD_RETRY_DELAY / 1000}秒后重试`, 'warning');
+
+        // Wait before retrying
+        await this.sleep(FlowBatchContentScript.CONFIG.SERVER_OVERLOAD_RETRY_DELAY);
+
+        // Throw RetryTaskError to signal that this task should be retried
+        throw new RetryTaskError(`Server overload detected: ${errorMessage}`);
       } else if (errorType === 'video_generation_failed') {
         this.log(`⚠️ 检测到视频生成失败: ${errorMessage}`, 'warning');
         this.logToPopup(`⏸️ 视频生成失败，等待${FlowBatchContentScript.CONFIG.RATE_LIMIT_RETRY_DELAY / 1000}秒后重试`, 'warning');
@@ -1751,6 +1776,16 @@ class FlowBatchContentScript {
 
         // Throw RetryTaskError to signal that this task should be retried
         throw new RetryTaskError(`Video generation failed: ${errorMessage}`);
+
+      } else if (errorType === 'policy_violation') {
+        this.log(`⚠️ 检测到政策违规误判: ${errorMessage}`, 'warning');
+        this.logToPopup(`⏸️ 政策违规误判，等待${FlowBatchContentScript.CONFIG.POLICY_VIOLATION_RETRY_DELAY / 1000}秒后重试`, 'warning');
+
+        // Wait before retrying
+        await this.sleep(FlowBatchContentScript.CONFIG.POLICY_VIOLATION_RETRY_DELAY);
+
+        // Throw RetryTaskError to signal that this task should be retried
+        throw new RetryTaskError(`Policy violation detected (retrying): ${errorMessage}`);
       }
     }
 
@@ -2470,7 +2505,93 @@ class FlowBatchContentScript {
       }
     }
 
-    // === Error Type 2: Video Generation Failure ===
+    // === Error Type 2: Server Overload (Flow is experiencing high demand) ===
+
+    // Method 1: Check known error container with visibility check
+    const serverOverloadDiv = document.querySelector('div.sc-76c40d50-2.kHGbiV');
+    if (serverOverloadDiv && serverOverloadDiv.offsetParent !== null) {
+      const text = serverOverloadDiv.textContent.trim();
+      if (text.includes('experiencing high demand')) {
+        this.log(`检测到服务器过载错误 (方法1-Visible Container): ${text}`, 'warning');
+        return { type: 'server_overload', message: text };
+      }
+    }
+
+    // === Error Type 3: Policy Violation (This image might violate our policies) ===
+
+    // Method 1: Check known error container
+    if (errorDiv && errorDiv.offsetParent !== null) {
+      const text = errorDiv.textContent.trim();
+      if (text.includes('violate our policies')) {
+        this.log(`检测到政策违规错误 (方法1-Visible Container): ${text}`, 'warning');
+        return { type: 'policy_violation', message: text };
+      }
+    }
+
+    // Method 2: XPath for policy violation
+    const policyText = "violate our policies";
+    const policyXPath = `//*[
+      not(self::script) and
+      not(self::style) and
+      not(self::noscript) and
+      not(ancestor::script) and
+      not(ancestor::style) and
+      contains(text(), "${policyText}")
+    ]`;
+    const policyElement = document.evaluate(policyXPath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+
+    if (policyElement && policyElement.offsetParent !== null) {
+      const fullText = policyElement.textContent.trim();
+      this.log(`检测到政策违规错误 (方法2-XPath): ${fullText.substring(0, 100)}...`, 'warning');
+      return { type: 'policy_violation', message: fullText };
+    }
+
+    // Method 2: XPath with script/style exclusion for server overload
+    const serverOverloadText = "Flow is experiencing high demand";
+    const serverOverloadXPath = `//*[
+      not(self::script) and
+      not(self::style) and
+      not(self::noscript) and
+      not(ancestor::script) and
+      not(ancestor::style) and
+      contains(text(), "${serverOverloadText}")
+    ]`;
+    const serverOverloadElement = document.evaluate(
+      serverOverloadXPath,
+      document,
+      null,
+      XPathResult.FIRST_ORDERED_NODE_TYPE,
+      null
+    ).singleNodeValue;
+
+    if (serverOverloadElement && serverOverloadElement.offsetParent !== null) {
+      const fullText = serverOverloadElement.textContent.trim();
+      const tagName = serverOverloadElement.tagName.toLowerCase();
+      this.log(`检测到服务器过载错误 (方法2-XPath, tag: ${tagName}): ${fullText.substring(0, 100)}...`, 'warning');
+      return { type: 'server_overload', message: fullText };
+    }
+
+    // Method 3: Fallback keywords for server overload (with script exclusion)
+    const serverOverloadKeywords = ['experiencing high demand', 'high demand', 'try again in a few minutes'];
+    for (const keyword of serverOverloadKeywords) {
+      const xp = `//*[
+        not(self::script) and
+        not(self::style) and
+        not(self::noscript) and
+        not(ancestor::script) and
+        not(ancestor::style) and
+        contains(text(), "${keyword}")
+      ]`;
+      const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+      if (el && el.offsetParent !== null) {
+        const fullText = el.textContent.trim();
+        const tagName = el.tagName.toLowerCase();
+        this.log(`检测到服务器过载错误 (方法3-Keyword:'${keyword}', tag: ${tagName}): ${fullText.substring(0, 100)}...`, 'warning');
+        return { type: 'server_overload', message: fullText };
+      }
+    }
+
+    // === Error Type 3: Video Generation Failure ===
 
     // Method 1: XPath with script/style exclusion for video generation failure
     const videoFailText = "Couldn't generate video";
@@ -3187,6 +3308,38 @@ class FlowBatchContentScript {
     const { ball, panel } = this.floatingUI;
     if (panel) panel.classList.remove('open');
     if (ball) ball.style.display = 'flex';
+  }
+
+  // 新增方法：更新悬浮球状态
+  updateFloatingBallStatus(text, type = 'normal') {
+    if (!this.floatingUI || !this.floatingUI.ball) return;
+
+    const ball = this.floatingUI.ball;
+
+    // 根据类型设置样式
+    const styles = {
+      normal: {
+        text: 'Flow',
+        bg: 'linear-gradient(135deg, #4A90E2, #8E2DE2)'
+      },
+      retry: {
+        text: text, // R1, R2, R3, R4, R5
+        bg: 'linear-gradient(135deg, #ff9800, #f57c00)'
+      },
+      error: {
+        text: 'Fail',
+        bg: 'linear-gradient(135deg, #f44336, #c62828)'
+      },
+      success: {
+        text: '✓',
+        bg: 'linear-gradient(135deg, #4caf50, #2e7d32)'
+      }
+    };
+
+    const style = styles[type] || styles.normal;
+    ball.textContent = style.text;
+    ball.style.background = style.bg;
+    ball.style.transition = 'all 0.3s ease';
   }
 
   // ===============================
