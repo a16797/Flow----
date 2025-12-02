@@ -10,34 +10,21 @@
  * - Logic Optimization: Eliminates redundant steps and wait conditions
  */
 
-// Custom error class for task retry signaling
-class RetryTaskError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = 'RetryTaskError';
-  }
-}
-
 class FlowBatchContentScript {
   // Configuration constants
   static CONFIG = {
     QUEUE_LIMIT: 4,                     // Flow queue limit (throttled)
     QUEUE_CHECK_INTERVAL: 500,          // ms between queue space checks
-    QUEUE_STATUS_LOG_INTERVAL: 10,       // log every N checks
+    QUEUE_STATUS_LOG_INTERVAL: 10,      // log every N checks
     QUEUE_CAPACITY_TIMEOUT: 120 * 1000, // 2 minutes max wait for queue space
     QUEUE_THROTTLE_DELAY: 60 * 1000,    // wait 60s before re-checking when full
-    TASK_DELAY: 300,                  // ms between tasks
-    VIDEO_GENERATION_TIMEOUT: 90 * 1000, // 90 seconds
+    TASK_DELAY: 300,                    // ms between tasks
+    VIDEO_GENERATION_TIMEOUT: 90 * 1000,// 90 seconds
     VIDEO_LOAD_TIMEOUT: 5 * 1000,       // 5 seconds for video load check
-    ELEMENT_WAIT_INTERVAL: 200,        // ms between element checks
+    ELEMENT_WAIT_INTERVAL: 200,         // ms between element checks
     CLICK_DELAY: 200,                   // ms after click
     SCROLL_DELAY: 300,                  // ms after scroll
-    PENDING_TASKS_WAIT: 5000,          // ms when waiting for pending tasks
-    // === Rate Limit and Error Detection (OPTIMIZED) ===
-    ERROR_POLL_INTERVAL: 1000,          // ms between error detection polls (1 second)
-    ERROR_POLL_MAX_ATTEMPTS: 5,         // max error detection attempts (5s total)
-    RATE_LIMIT_RETRY_DELAY: 10000,      // 10 seconds delay before retrying on rate limit
-    VIDEO_SRC_LOAD_WAIT: 5000,          // 5 seconds wait for video src to load
+    PENDING_TASKS_WAIT: 5000            // ms when waiting for pending tasks
   };
 
   constructor() {
@@ -49,7 +36,6 @@ class FlowBatchContentScript {
     this.setupMessageHandlers();
     this.initializeAutoResume();
     this.injectFloatingWidget();
-    this.initBatchDownloader(); // 初始化批量下载器
     this.log('Content Script initialized and ready');
   }
 
@@ -73,7 +59,7 @@ class FlowBatchContentScript {
   async handleMessage(message, sender, sendResponse) {
     // CRITICAL FIX: Track if response was sent to prevent double response
     let responseSent = false;
-
+    
     const safeSendResponse = (data) => {
       if (!responseSent && sendResponse) {
         responseSent = true;
@@ -115,6 +101,11 @@ class FlowBatchContentScript {
           safeSendResponse({ ok: true });
           return;
 
+        case 'FLOW_BATCH_SWITCH_MODE':
+          await this.ensureCorrectMode(message.mode);
+          safeSendResponse({ ok: true });
+          return;
+
         default:
           safeSendResponse({ ok: false, error: 'Unknown message type' });
           return;
@@ -132,57 +123,57 @@ class FlowBatchContentScript {
   async handleStartQueue(metadata) {
     // ULTIMATE FIX: User explicitly wants to start queue, so FORCE STOP everything first
     this.log('User requested queue start - forcing clean state...', 'info');
-
+    
     // STEP 1: Force stop memory state immediately
     this.queueRunning = false;
-
+    
     // STEP 2: Force stop storage state
-    await this.updateQueueState({
-      running: false,
-      paused: false,
-      pendingTasks: 0
+    await this.updateQueueState({ 
+      running: false, 
+      paused: false, 
+      pendingTasks: 0 
     }).catch(() => {
       // Ignore errors, just try to reset
     });
-
+    
     // STEP 3: Wait for any running process to stop
     await this.sleep(800);
-
+    
     // STEP 4: Double-check and force reset again
     this.queueRunning = false;
     const currentState = await this.loadQueueState();
     if (currentState && currentState.running) {
       this.log('Force clearing running state from storage...', 'warning');
-      await this.updateQueueState({
-        running: false,
-        paused: false,
+      await this.updateQueueState({ 
+        running: false, 
+        paused: false, 
         pendingTasks: 0,
         currentIndex: 0,
         successCount: 0,
         failCount: 0
-      }).catch(() => { });
-      await this.sleep(1000);
+      }).catch(() => {});
+      await this.sleep(300);
     }
-
+    
     // STEP 5: Final check - if still running, it's a real active queue
     const finalState = await this.loadQueueState();
     if (finalState && finalState.running && !finalState.paused) {
       const isQueueActive = finalState.currentIndex < finalState.totalTasks;
       const hasPendingTasks = (finalState.pendingTasks || 0) > 0;
-
+      
       // Only prevent if queue is TRULY active (has pending tasks or not completed)
       if (hasPendingTasks && hasPendingTasks > 0) {
         this.log(`WARNING: Queue has ${hasPendingTasks} pending tasks. User may want to wait.`, 'warning');
         // Still allow start, but warn user
         this.logToPopup(`警告: 检测到 ${hasPendingTasks} 个待处理任务，将清除旧队列`, 'warning');
       }
-
+      
       // Force clear anyway since user explicitly requested start
-      await this.updateQueueState({
-        running: false,
-        paused: false,
-        pendingTasks: 0
-      }).catch(() => { });
+      await this.updateQueueState({ 
+        running: false, 
+        paused: false, 
+        pendingTasks: 0 
+      }).catch(() => {});
     }
 
     // STEP 6: Ensure memory state is clean
@@ -208,39 +199,38 @@ class FlowBatchContentScript {
       successCount: 0,
       failCount: 0,
       pendingTasks: 0,
-      retryCounters: {}, // Track retry count for each task index
       flowMode: metadata.flowMode,
       cropMode: metadata.cropMode,
       createdAt: Date.now()
     };
-
+    
     await this.updateQueueState(newQueueState);
 
     this.log(`Starting FRESH queue with ${metadata.totalTasks} tasks`, 'success');
     this.logToPopup(`开始处理 ${metadata.totalTasks} 个任务`, 'info');
 
     // CRITICAL FIX: Ensure correct mode before processing
-    await this.ensureCorrectMode(metadata.flowMode);
+    try {
+      await this.ensureCorrectMode(metadata.flowMode);
+      await this.ensureGlobalSettings(metadata);
+    } catch (error) {
+      this.log(`Mode switch or settings failed: ${error.message}`, 'error');
+      // Continue anyway, maybe user is already in correct mode manually
+    }
 
     // Start queue processing (don't await, let it run in background)
     this.processQueue().catch(error => {
       this.log(`Queue processing error: ${error.message}`, 'error');
       this.queueRunning = false;
-      this.updateQueueState({ running: false }).catch(() => { });
+      this.updateQueueState({ running: false }).catch(() => {});
     });
   }
 
   async handlePauseQueue() {
     this.queueRunning = false;
-
-    // CRITICAL FIX: Ensure both memory and storage state are paused
     await this.updateQueueState({ running: false, paused: true });
-
-    // Clear file cache to prevent any ongoing operations
-    this.fileCache.clear();
-
-    this.log('Queue paused - all operations stopped', 'warning');
-    this.logToPopup('队列已暂停 - 所有操作已停止', 'warning');
+    this.log('Queue paused', 'warning');
+    this.logToPopup('队列已暂停', 'warning');
   }
 
   async handleClearQueue() {
@@ -306,18 +296,18 @@ class FlowBatchContentScript {
 
   async processQueue() {
     this.log('Queue processing started', 'info');
-
+    
     while (this.queueRunning) {
       try {
         const state = await this.loadQueueState();
-
+        
         if (!state) {
           this.log('Queue state missing, stopping queue', 'warning');
           this.queueRunning = false;
           this.currentTaskPointer = 0;
           break;
         }
-
+        
         // Check if queue should stop
         if (state.currentIndex >= (state.totalTasks || 0)) {
           // Check if there are still pending tasks
@@ -332,14 +322,14 @@ class FlowBatchContentScript {
           // Queue is truly completed
           this.log('Queue completed', 'success');
           this.logToPopup('队列处理完成', 'success');
-
+          
           // CRITICAL: Always reset both memory and storage state
           this.queueRunning = false;
           this.currentTaskPointer = state.totalTasks || 0;
-          await this.updateQueueState({
-            running: false,
-            paused: false,
-            pendingTasks: 0
+          await this.updateQueueState({ 
+            running: false, 
+            paused: false, 
+            pendingTasks: 0 
           });
           break;
         }
@@ -372,9 +362,9 @@ class FlowBatchContentScript {
 
         // CRITICAL FIX: Capture current index before processing to avoid race conditions
         const currentTaskIndex = this.currentTaskPointer;
-
+        
         this.log(`处理任务 ${currentTaskIndex + 1}/${state.totalTasks}`, 'info');
-
+        
         // Process task with captured index
         await this.processTask(currentTaskIndex);
 
@@ -389,63 +379,6 @@ class FlowBatchContentScript {
         await this.sleep(FlowBatchContentScript.CONFIG.TASK_DELAY);
 
       } catch (error) {
-        // CRITICAL FIX: Get currentTaskIndex from latest state
-        const errorState = await this.loadQueueState();
-        const currentTaskIndex = this.currentTaskPointer || (errorState ? errorState.currentIndex : 0);
-
-        // === NEW: Detect RetryTaskError with 3-retry limit ===
-        if (error instanceof RetryTaskError) {
-          // Get current retry count for this task
-          const state = await this.loadQueueState();
-          if (!state) {
-            this.log('Queue state missing during retry, stopping queue', 'error');
-            this.queueRunning = false;
-            break;
-          }
-
-          // Initialize retryCounters if not exists
-          if (!state.retryCounters) {
-            state.retryCounters = {};
-          }
-
-          const currentRetryCount = state.retryCounters[currentTaskIndex] || 0;
-          const maxRetries = 3;
-
-          if (currentRetryCount < maxRetries) {
-            // Still have retry chances
-            const newRetryCount = currentRetryCount + 1;
-            const remainingRetries = maxRetries - newRetryCount;
-
-            // Update retry counter
-            state.retryCounters[currentTaskIndex] = newRetryCount;
-            await this.updateQueueState(state);
-
-            this.log(`任务 ${currentTaskIndex + 1} 第 ${newRetryCount} 次重试 (剩余 ${remainingRetries} 次机会): ${error.message}`, 'warning');
-            this.logToPopup(`⏸️ 任务 ${currentTaskIndex + 1} 第 ${newRetryCount} 次重试 (剩余 ${remainingRetries} 次机会)`, 'warning');
-
-            // Don't increment currentIndex, next loop will retry the same task
-            continue;
-          } else {
-            // Exceeded max retries, mark as failed and move to next task
-            this.log(`❌ 任务 ${currentTaskIndex + 1} 已重试 ${maxRetries} 次，标记为失败`, 'error');
-            this.logToPopup(`❌ 任务 ${currentTaskIndex + 1} 重试次数已达上限 (${maxRetries} 次)，跳过该任务`, 'error');
-
-            // Clear retry counter for this task
-            delete state.retryCounters[currentTaskIndex];
-
-            // Increment fail count and move to next task
-            state.failCount = (state.failCount || 0) + 1;
-            state.currentIndex = currentTaskIndex + 1;
-            this.currentTaskPointer = state.currentIndex;
-            await this.updateQueueState(state);
-
-            // Continue with next task
-            await this.sleep(1000);
-            continue;
-          }
-        }
-
-        // === Original error handling for other errors ===
         this.log(`Queue processing error: ${error.message}`, 'error');
         this.logToPopup(`任务处理失败: ${error.message}`, 'error');
 
@@ -467,18 +400,18 @@ class FlowBatchContentScript {
           this.queueRunning = false;
           break;
         }
-
+        
         // Brief delay after error before retrying
         await this.sleep(1000);
       }
     }
-
+    
     // CRITICAL: Ensure state is reset when loop exits
     this.log('Queue processing loop exited', 'info');
     if (this.queueRunning) {
       // If we exited but queueRunning is still true, something went wrong
       this.queueRunning = false;
-      await this.updateQueueState({ running: false }).catch(() => { });
+      await this.updateQueueState({ running: false }).catch(() => {});
     }
   }
 
@@ -487,13 +420,6 @@ class FlowBatchContentScript {
   // ===============================
 
   async processTask(taskIndex) {
-    // CRITICAL FIX: Check for pause before starting task
-    const currentState = await this.loadQueueState();
-    if (!currentState || !currentState.running || currentState.paused) {
-      this.log(`Task ${taskIndex + 1} aborted due to pause/stop`, 'warning');
-      return;
-    }
-
     // CRITICAL FIX: Validate task index
     if (taskIndex < 0 || taskIndex >= this.metadata.totalTasks) {
       throw new Error(`Invalid task index: ${taskIndex} (total: ${this.metadata.totalTasks})`);
@@ -507,24 +433,14 @@ class FlowBatchContentScript {
     this.logToPopup(`开始任务 ${taskIndex + 1}/${this.metadata.totalTasks}: ${prompt.substring(0, 30)}...`, 'info');
 
     try {
-      // CRITICAL FIX: Ensure correct mode before processing
-      await this.ensureCorrectMode(this.metadata.flowMode);
-
-      // Check pause status before file request
-      const state1 = await this.loadQueueState();
-      if (!state1 || !state1.running || state1.paused) {
-        this.log(`Task ${taskIndex + 1} paused before file request`, 'warning');
-        return;
-      }
-
       // CRITICAL FIX: Request file with validated index
       this.log(`Requesting file for task index ${taskIndex}: ${filename}`, 'info');
       const fileData = await this.requestFileData(taskIndex);
-
+      
       if (!fileData || !fileData.name) {
         throw new Error(`Failed to get file data for index ${taskIndex}`);
       }
-
+      
       this.log(`File data received: ${fileData.name} (index ${taskIndex})`, 'success');
 
       // Step 1: Upload image (only for modes that need it)
@@ -535,22 +451,8 @@ class FlowBatchContentScript {
 
       // Step 2: Handle cropping (with improved timing)
       if (this.needsImageUpload(this.metadata.flowMode)) {
-        // Check pause status before cropping
-        const state2 = await this.loadQueueState();
-        if (!state2 || !state2.running || state2.paused) {
-          this.log(`Task ${taskIndex + 1} paused before cropping`, 'warning');
-          return;
-        }
-
         await this.handleCropModal(this.metadata?.cropMode);
         this.logToPopup('✅ 裁剪完成 (使用全局设置)', 'success');
-      }
-
-      // Check pause status before prompt input
-      const state3 = await this.loadQueueState();
-      if (!state3 || !state3.running || state3.paused) {
-        this.log(`Task ${taskIndex + 1} paused before prompt input`, 'warning');
-        return;
       }
 
       // Step 3: Input prompt
@@ -576,16 +478,9 @@ class FlowBatchContentScript {
       } catch (error) {
         this.log(`无法获取提交前视频数量: ${error.message}`, 'warning');
       }
-
-      // Check pause status before submission
-      const state4 = await this.loadQueueState();
-      if (!state4 || !state4.running || state4.paused) {
-        this.log(`Task ${taskIndex + 1} paused before submission`, 'warning');
-        return;
-      }
-
+      
       await this.submitForGeneration();
-
+      
       // CRITICAL FIX: Atomic increment of pendingTasks
       const state = await this.loadQueueState();
       if (state) {
@@ -604,7 +499,7 @@ class FlowBatchContentScript {
 
     } catch (error) {
       this.log(`Task ${taskIndex + 1} failed: ${error.message}`, 'error');
-
+      
       // CRITICAL FIX: Atomic decrement on error
       const state = await this.loadQueueState();
       if (state) {
@@ -613,7 +508,7 @@ class FlowBatchContentScript {
           failCount: (state.failCount || 0) + 1
         });
       }
-
+      
       throw error;
     }
   }
@@ -621,27 +516,13 @@ class FlowBatchContentScript {
   // Wait for task completion in background and update pendingTasks
   async waitForTaskCompletion(taskIndex, prompt, videoCountBeforeSubmit = 0) {
     try {
-      // CRITICAL FIX: Check pause status before starting completion process
-      const currentState = await this.loadQueueState();
-      if (!currentState || !currentState.running || currentState.paused) {
-        this.log(`Task ${taskIndex + 1} completion aborted due to pause/stop`, 'warning');
-        return;
-      }
-
       this.log(`任务 ${taskIndex + 1} 开始等待生成完成...`, 'info');
-      this.logToPopup(`⏳ 任务 ${taskIndex + 1} 等待生成完成（约2分钟）...`, 'info');
-
+      this.logToPopup(`⏳ 任务 ${taskIndex + 1} 等待生成完成（约1分钟）...`, 'info');
+      
       // Step 1: 等待视频真正生成完成（视频加载完成，可以播放）
       const downloadUrl = await this.waitForGeneration(taskIndex, videoCountBeforeSubmit);
-
+      
       // Step 2: 视频生成完成后，立即下载
-      // Check pause status before downloading
-      const downloadState = await this.loadQueueState();
-      if (!downloadState || !downloadState.running || downloadState.paused) {
-        this.log(`Task ${taskIndex + 1} download aborted due to pause/stop`, 'warning');
-        return;
-      }
-
       this.log(`任务 ${taskIndex + 1} 视频生成完成，开始下载...`, 'info');
       this.logToPopup(`📥 任务 ${taskIndex + 1} 开始下载...`, 'info');
       await this.downloadVideo(downloadUrl, taskIndex, prompt);
@@ -649,27 +530,25 @@ class FlowBatchContentScript {
       this.log(`✅ 任务 ${taskIndex + 1} 完成并已下载`, 'success');
       this.logToPopup(`✅ 任务 ${taskIndex + 1} 完成并已下载`, 'success');
 
-      // CRITICAL FIX: Atomic update of pendingTasks with pause check
-      const finalState = await this.loadQueueState();
-      if (finalState && finalState.running && !finalState.paused) {
-        const newPendingTasks = Math.max(0, (finalState.pendingTasks || 0) - 1);
+      // CRITICAL FIX: Atomic update of pendingTasks
+      const state = await this.loadQueueState();
+      if (state) {
+        const newPendingTasks = Math.max(0, (state.pendingTasks || 0) - 1);
         await this.updateQueueState({
-          successCount: (finalState.successCount || 0) + 1,
+          successCount: (state.successCount || 0) + 1,
           pendingTasks: newPendingTasks
         });
-
+        
         const queueLimit = FlowBatchContentScript.CONFIG.QUEUE_LIMIT;
         this.log(`✅ 队列更新: ${newPendingTasks}/${queueLimit} (任务 ${taskIndex + 1} 完成)`, 'success');
         if (newPendingTasks < queueLimit) {
           this.logToPopup(`✅ 队列有空闲 (${newPendingTasks}/${queueLimit})，可以继续发送`, 'success');
         }
-      } else {
-        this.log(`Task ${taskIndex + 1} completed but queue is paused/stopped, skipping state update`, 'warning');
       }
     } catch (error) {
       this.log(`❌ 任务 ${taskIndex + 1} 完成处理失败: ${error.message}`, 'error');
       this.logToPopup(`❌ 任务 ${taskIndex + 1} 失败: ${error.message}`, 'error');
-
+      
       // CRITICAL FIX: Atomic update even on error
       const state = await this.loadQueueState();
       if (state) {
@@ -687,21 +566,22 @@ class FlowBatchContentScript {
   // Wait for queue space (pendingTasks < 5)
   async waitForQueueSpace(maxWait = 300000) { // 5 minutes max wait
     const startTime = Date.now();
-
+    
     while (Date.now() - startTime < maxWait) {
       const state = await this.loadQueueState();
+      const limit = FlowBatchContentScript.CONFIG.QUEUE_LIMIT || 4;
       const pendingTasks = state.pendingTasks || 0;
-
-      if (pendingTasks < 5) {
-        this.log(`Queue has space (${pendingTasks}/5), resuming...`, 'success');
-        this.logToPopup(`队列有空闲 (${pendingTasks}/5)，继续发送`, 'success');
+      
+      if (pendingTasks < limit) {
+        this.log(`Queue has space (${pendingTasks}/${limit}), resuming...`, 'success');
+        this.logToPopup(`队列有空闲 (${pendingTasks}/${limit})，继续发送`, 'success');
         return true;
       }
-
+      
       // Wait 5 seconds before checking again
       await this.sleep(5000);
     }
-
+    
     this.log('Queue space wait timeout', 'warning');
     this.logToPopup('等待队列空闲超时', 'warning');
     return false;
@@ -778,28 +658,29 @@ class FlowBatchContentScript {
 
   async ensureGlobalSettings(metadata) {
     try {
-      await this.setGlobalAspectRatio(metadata?.cropMode);
+      // Use videoRatio for global aspect ratio setting (default to cropMode if missing for backward compatibility)
+      await this.setGlobalAspectRatio(metadata?.videoRatio || metadata?.cropMode);
     } catch (error) {
       this.log(`Failed to set global settings: ${error.message}`, 'warning');
     }
   }
 
-  async setGlobalAspectRatio(cropMode) {
-    if (!cropMode) {
-      this.log('No crop mode specified, skipping global aspect ratio setting', 'info');
+  async setGlobalAspectRatio(ratioMode) {
+    if (!ratioMode) {
+      this.log('No video ratio specified, skipping global aspect ratio setting', 'info');
       return;
     }
 
-    const isPortrait = cropMode === 'portrait' || cropMode === '9:16';
+    const isPortrait = ratioMode === 'portrait' || ratioMode === '9:16';
     const iconText = isPortrait ? 'crop_portrait' : 'crop_landscape';
-    const labelText = isPortrait ? 'Portrait (9:16)' : 'Landscape (16:9)';
-
-    this.log(`Setting global aspect ratio to: ${labelText} (icon: ${iconText})`, 'info');
+    const labelTexts = isPortrait 
+      ? ['Portrait (9:16)', 'แนวตั้ง (9:16)'] 
+      : ['Landscape (16:9)', 'แนวนอน (16:9)'];
+    
+    this.log(`Setting global aspect ratio to: ${labelTexts.join(' or ')} (icon: ${iconText})`, 'info');
 
     try {
       // Step 1: Find and click the Settings button (tune icon)
-      // User provided: <button aria-haspopup="dialog" aria-controls="radix-:r19k:" data-state="closed">
-      //                <i class="material-icons-outlined">tune</i>
       const settingsButton = await this.findSettingsButton();
       if (!settingsButton) {
         this.log('Settings button not found, skipping global aspect ratio setting', 'warning');
@@ -809,23 +690,92 @@ class FlowBatchContentScript {
 
       // Check if settings dialog is already open
       const isOpen = settingsButton.getAttribute('aria-expanded') === 'true' ||
-        settingsButton.getAttribute('data-state') === 'open';
-
+                     settingsButton.getAttribute('data-state') === 'open';
+      
+      let container = null;
       if (!isOpen) {
         this.log('Clicking Settings button to open dialog...', 'info');
         await this.clickElement(settingsButton);
-        await this.sleep(1500); // Wait longer for dialog to fully open and render
+        await this.sleep(500);
       } else {
         this.log('Settings dialog already open', 'info');
-        await this.sleep(FlowBatchContentScript.CONFIG.QUEUE_CHECK_INTERVAL); // Still wait a bit to ensure it's fully rendered
       }
 
-      // Step 2: Find and click the aspect ratio option in the opened dialog
-      this.log(`Searching for aspect ratio option: ${labelText} (icon: ${iconText})...`, 'info');
-      const toggle = await this.findGlobalAspectToggle(iconText, labelText);
+      const ariaControls = settingsButton.getAttribute('aria-controls');
+      if (ariaControls) {
+        try {
+          container = await this.waitForElement(`//*[@id='${ariaControls}']`, 2000);
+        } catch (_) {}
+      }
+      if (!container) {
+        try {
+          container = await this.waitForElement('//*[@role="dialog" or contains(@id, "radix-")]', 2000);
+        } catch (_) {}
+      }
+      if (!container) {
+        await this.sleep(800);
+      }
+
+      // Step 2: NEW LOGIC - Find Aspect Ratio Combobox (Dropdown)
+      // Matches user provided HTML: <button role="combobox">...<span>สัดส่วนภาพ</span>...</button>
+      this.log('Searching for Aspect Ratio Combobox...', 'info');
+      const combobox = await this.findAspectRatioCombobox(container);
+      
+      if (combobox) {
+        this.log('Found Aspect Ratio Combobox, checking current value...', 'info');
+        const currentText = (combobox.textContent || combobox.innerText || '').trim();
+        
+        // Check if desired ratio is already selected
+        const isAlreadySelected = labelTexts.some(label => currentText.includes(label)) ||
+                                 (isPortrait && (currentText.includes('9:16') || currentText.includes('Portrait'))) ||
+                                 (!isPortrait && (currentText.includes('16:9') || currentText.includes('Landscape')));
+
+        if (isAlreadySelected) {
+          this.log(`✅ Aspect ratio already set to: ${currentText}`, 'success');
+          this.logToPopup(`✅ 全局裁剪比例已设置: ${currentText}`, 'success');
+          return;
+        }
+
+        // Click combobox to open options
+        this.log('Clicking combobox to open options...', 'info');
+        await this.clickElement(combobox);
+        await this.sleep(500);
+
+        // Find and click the option in the dropdown list
+        // Dropdown usually appears in a portal/layer, not necessarily inside the combobox
+        const option = await this.findAspectRatioOption(labelTexts, isPortrait);
+        
+        if (option) {
+          await this.clickElement(option);
+          this.log(`✅ Selected aspect ratio option`, 'success');
+          this.logToPopup(`✅ 已设置全局裁剪比例`, 'success');
+          await this.sleep(300);
+          return;
+        } else {
+          this.log('Failed to find aspect ratio option in dropdown', 'warning');
+        }
+      } else {
+        this.log('Aspect Ratio Combobox not found, trying legacy toggle search...', 'info');
+      }
+
+      // Fallback to legacy toggle search (previous logic)
+      this.log(`Searching for aspect ratio option (legacy)...`, 'info');
+      
+      let toggle = null;
+      let usedLabel = '';
+      
+      for (const label of labelTexts) {
+        this.log(`Trying label: "${label}"...`, 'info');
+        toggle = await this.findGlobalAspectToggle(iconText, label, container);
+        if (toggle) {
+          usedLabel = label;
+          break;
+        }
+      }
+
       if (!toggle) {
-        this.log(`Global aspect ratio toggle not found for ${labelText}`, 'warning');
-        this.logToPopup(`⚠️ 未找到裁剪比例选项: ${labelText}`, 'warning');
+        this.log(`Global aspect ratio toggle not found`, 'warning');
+        this.logToPopup(`⚠️ 未找到裁剪比例选项`, 'warning');
         return;
       }
 
@@ -839,25 +789,25 @@ class FlowBatchContentScript {
         toggle.getAttribute('data-selected') === 'true';
 
       if (isActive) {
-        this.log(`Global aspect ratio already set to ${labelText}`, 'info');
-        this.logToPopup(`✅ 全局裁剪比例已设置: ${labelText}`, 'info');
+        this.log(`Global aspect ratio already set to ${usedLabel}`, 'info');
+        this.logToPopup(`✅ 全局裁剪比例已设置: ${usedLabel}`, 'info');
         return;
       }
 
-      this.log(`Clicking global aspect ratio toggle: ${labelText}`, 'info');
+      this.log(`Clicking global aspect ratio toggle: ${usedLabel}`, 'info');
       await this.clickElement(toggle);
       await this.sleep(600); // Wait for UI to update
-
+      
       // Verify the click worked
       const isActiveAfter = toggle.getAttribute('aria-checked') === 'true' ||
-        toggle.getAttribute('aria-pressed') === 'true' ||
-        toggle.classList.contains('active') ||
-        toggle.classList.contains('selected') ||
-        toggle.getAttribute('data-state') === 'on';
-
+                           toggle.getAttribute('aria-pressed') === 'true' ||
+                           toggle.classList.contains('active') ||
+                           toggle.classList.contains('selected') ||
+                           toggle.getAttribute('data-state') === 'on';
+      
       if (isActiveAfter) {
-        this.log(`✅ Global aspect ratio set to ${labelText}`, 'success');
-        this.logToPopup(`✅ 已设置全局裁剪比例: ${labelText}`, 'success');
+        this.log(`✅ Global aspect ratio set to ${usedLabel}`, 'success');
+        this.logToPopup(`✅ 已设置全局裁剪比例: ${usedLabel}`, 'success');
       } else {
         this.log(`⚠️ Global aspect ratio click may not have taken effect`, 'warning');
         this.logToPopup(`⚠️ 全局裁剪比例设置可能未生效`, 'warning');
@@ -866,6 +816,50 @@ class FlowBatchContentScript {
       this.log(`Failed to set global aspect ratio: ${error.message}`, 'error');
       this.logToPopup(`⚠️ 设置全局裁剪比例失败: ${error.message}`, 'error');
     }
+  }
+
+  async findAspectRatioCombobox(container) {
+    const strategies = [
+      // Strategy 1: Thai text "สัดส่วนภาพ" inside a combobox button
+      '//button[@role="combobox" and .//span[contains(text(), "สัดส่วนภาพ")]]',
+      // Strategy 2: English text "Aspect Ratio" inside a combobox button
+      '//button[@role="combobox" and .//span[contains(text(), "Aspect Ratio")]]',
+      // Strategy 3: Just searching for the text "สัดส่วนภาพ" and finding parent button
+      '//span[contains(text(), "สัดส่วนภาพ")]/ancestor::button[1]',
+      // Strategy 4: Fallback to any combobox containing 9:16 or 16:9
+      '//button[@role="combobox" and (contains(., "9:16") or contains(., "16:9"))]'
+    ];
+
+    for (const xpath of strategies) {
+      try {
+        const element = await this.waitForElement(xpath, 1000);
+        if (element) return element;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  async findAspectRatioOption(labelTexts, isPortrait) {
+    // Search in the document (dropdowns are often appended to body)
+    const strategies = [];
+    
+    for (const label of labelTexts) {
+      strategies.push(`//div[@role="option" and contains(., "${label}")]`);
+      strategies.push(`//span[contains(text(), "${label}")]/ancestor::div[@role="option"][1]`);
+      strategies.push(`//div[contains(@class, "item") and contains(., "${label}")]`);
+    }
+
+    // Add generic strategies
+    const ratio = isPortrait ? '9:16' : '16:9';
+    strategies.push(`//div[@role="option" and contains(., "${ratio}")]`);
+
+    for (const xpath of strategies) {
+      try {
+        const element = await this.waitForElement(xpath, 1000);
+        if (element) return element;
+      } catch (_) {}
+    }
+    return null;
   }
 
   async findSettingsButton() {
@@ -920,15 +914,15 @@ class FlowBatchContentScript {
     return null;
   }
 
-  async findGlobalAspectToggle(iconText, labelText) {
+  async findGlobalAspectToggle(iconText, labelText, container) {
     // User provided: <span class="sc-4b3fbad9-5 blfRBx">
     //                  <i class="material-icons">crop_portrait</i>Portrait (9:16)
     //                 </span>
     // These are in the settings dialog that opens after clicking the Settings button
-
+    
     // Wait a bit more for dialog content to fully render
     await this.sleep(800);
-
+    
     const strategies = [
       // Strategy 1: Find span with icon and text, then get clickable parent (button or div)
       `//span[.//i[contains(text(), "${iconText}")] and contains(normalize-space(.), "${labelText}")]/ancestor::button[1]`,
@@ -959,7 +953,7 @@ class FlowBatchContentScript {
           const icons = element.querySelectorAll('i.material-icons, i[class*="material-icons"]');
           let foundIcon = false;
           let iconContent = '';
-
+          
           for (const icon of icons) {
             iconContent = icon.textContent || icon.innerText || '';
             if (iconContent.includes(iconText)) {
@@ -967,7 +961,7 @@ class FlowBatchContentScript {
               break;
             }
           }
-
+          
           if (foundIcon && elementText.includes(labelText)) {
             this.log(`Found aspect ratio toggle using strategy ${i + 1} (text: ${elementText}, icon: ${iconContent})`, 'success');
             return element;
@@ -984,37 +978,37 @@ class FlowBatchContentScript {
     this.log('Trying fallback: searching all spans with aspect ratio text in dialog...', 'info');
     try {
       await this.sleep(500);
-
-      const allSpans = document.querySelectorAll('span');
+      const scope = container || document;
+      const allSpans = scope.querySelectorAll('span');
       this.log(`Found ${allSpans.length} spans in dialog, searching for aspect ratio...`, 'info');
-
+      
       for (const span of allSpans) {
         const spanText = (span.textContent || span.innerText || '').trim();
         if (!spanText.includes('Portrait') && !spanText.includes('Landscape')) continue;
-
+        
         // Check all icons, not just material-icons
         const icons = span.querySelectorAll('i');
-
+        
         for (const icon of icons) {
           const iconContent = (icon.textContent || icon.innerText || '').trim();
           if (iconContent.includes(iconText) && spanText.includes(labelText)) {
             this.log(`Found matching span: text="${spanText}", icon="${iconContent}"`, 'info');
-
+            
             // Find clickable parent (button, div with onclick, or element with role="button")
-            let clickable = span.closest('button') ||
-              span.closest('[role="button"]') ||
-              span.closest('[onclick]') ||
-              span.closest('div[onclick]');
-
+            let clickable = span.closest('button') || 
+                           span.closest('[role="button"]') || 
+                           span.closest('[onclick]') ||
+                           span.closest('div[onclick]');
+            
             // If no clickable parent found, check parent elements
             if (!clickable) {
               let current = span.parentElement;
               let depth = 0;
               while (current && depth < 5) {
-                if (current.tagName === 'BUTTON' ||
-                  current.getAttribute('role') === 'button' ||
-                  current.onclick ||
-                  (current.tagName === 'DIV' && current.onclick)) {
+                if (current.tagName === 'BUTTON' || 
+                    current.getAttribute('role') === 'button' ||
+                    current.onclick ||
+                    (current.tagName === 'DIV' && current.onclick)) {
                   clickable = current;
                   break;
                 }
@@ -1022,7 +1016,7 @@ class FlowBatchContentScript {
                 depth++;
               }
             }
-
+            
             if (clickable) {
               this.log(`✅ Found aspect ratio toggle via fallback (text: ${spanText}, clickable: ${clickable.tagName})`, 'success');
               return clickable;
@@ -1032,7 +1026,7 @@ class FlowBatchContentScript {
           }
         }
       }
-
+      
       this.log(`⚠️ Searched ${allSpans.length} spans but couldn't find clickable aspect ratio toggle`, 'warning');
     } catch (error) {
       this.log(`Fallback search failed: ${error.message}`, 'error');
@@ -1095,7 +1089,8 @@ class FlowBatchContentScript {
         'frames to video',
         'frames-to-video',
         '图片转视频',
-        '帧转视频'
+        '帧转视频',
+        'เปลี่ยนเฟรมเป็นวิดีโอ'
       ],
       'ingredients_to_video': [
         'ingredients to video',
@@ -1121,6 +1116,7 @@ class FlowBatchContentScript {
   }
 
   async findModeOption(targetMode, modeButton) {
+    // UPDATED: Focus on Text to Video and Frames to Video only (as user specified)
     const optionPatterns = {
       'text_to_video': [
         '//*[contains(text(), "Text to Video")]',
@@ -1187,12 +1183,14 @@ class FlowBatchContentScript {
     }
 
     const patterns = optionPatterns[targetMode] || [];
+
     for (const xpath of patterns) {
       try {
         const elements = await this.waitForElements(xpath, 1200);
         const clickableElement = elements.find(el =>
           el.tagName === 'BUTTON' || el.tagName === 'LI' || el.tagName === 'DIV' || el.getAttribute('role') === 'option'
         );
+
         if (clickableElement) {
           this.log(`Found mode option using: ${xpath}`, 'info');
           return clickableElement;
@@ -1201,6 +1199,7 @@ class FlowBatchContentScript {
         continue;
       }
     }
+
     return null;
   }
 
@@ -1215,7 +1214,7 @@ class FlowBatchContentScript {
     if (!container) {
       try {
         container = await this.waitForElement('//*[(@role="listbox" or @role="menu") and (@data-state="open" or @aria-hidden="false" or not(@aria-hidden))]', 1500);
-      } catch (_) { }
+      } catch (_) {}
     }
     const scope = container || document;
     const candidates = scope.querySelectorAll('button, [role="option"], [role="menuitem"], [role="menuitemradio"], li');
@@ -1228,7 +1227,7 @@ class FlowBatchContentScript {
         await this.sleep(600);
         const ok = await this.verifyModeUI(targetMode);
         if (ok) return true;
-      } catch (_) { }
+      } catch (_) {}
     }
     return false;
   }
@@ -1342,7 +1341,7 @@ class FlowBatchContentScript {
 
     this.log('Found Add button, clicking...', 'info');
     await this.clickElement(uploadButton);
-    await this.sleep(800); // Increased to avoid rate limiting
+    await this.sleep(400); // Further optimized from 800ms
 
     // Wait for upload dialog and find file input
     const fileInput = await this.findFileInput();
@@ -1377,13 +1376,12 @@ class FlowBatchContentScript {
   async handleCropModal(cropMode) {
     this.log(`处理裁剪弹窗，模式: ${cropMode}`, 'info');
 
-    // 1. 等待裁剪弹窗出现
     try {
       await this.waitForElement(
-        '//*[contains(normalize-space(.), "Crop")]',
+        '//button[contains(normalize-space(.), "Crop and Save") or contains(normalize-space(.), "ครอบตัดและบันทึก") or (.//i[contains(text(), "crop")] and (contains(normalize-space(.), "Save") or contains(normalize-space(.), "บันทึก") or contains(normalize-space(.), "保存")))]',
         8000
       );
-      await this.sleep(1000); // 等待弹窗完全渲染
+      await this.sleep(1000);
     } catch (error) {
       this.log('裁剪弹窗未出现，跳过', 'warning');
       return;
@@ -1395,45 +1393,70 @@ class FlowBatchContentScript {
       const targetText = isPortrait ? 'Portrait' : 'Landscape';
       const targetRatio = isPortrait ? '9:16' : '16:9';
       const iconText = isPortrait ? 'crop_9_16' : 'crop_16_9';
-
+      
       this.log(`目标裁剪比例: ${targetText} (${targetRatio}), 图标: ${iconText}`, 'info');
-
+      
       try {
         // 查找所有 combobox 按钮（包含 Portrait 或 Landscape 的）
         await this.sleep(FlowBatchContentScript.CONFIG.QUEUE_CHECK_INTERVAL);
         const allButtons = document.querySelectorAll('button[role="combobox"]');
-
+        
         this.log(`找到 ${allButtons.length} 个 combobox 按钮`, 'info');
-
+        
         // 查找包含 "Portrait" 或 "Landscape" 的按钮（这是下拉按钮，不是选项）
         let aspectRatioButton = null;
         for (const btn of allButtons) {
           const btnText = (btn.textContent || btn.innerText || '').trim();
-          if (btnText.includes('Portrait') || btnText.includes('Landscape')) {
+          // Enhanced detection for Thai and generic ratios
+          if (btnText.includes('Portrait') || btnText.includes('Landscape') ||
+              btnText.includes('แนวนอน') || btnText.includes('แนวตั้ง') ||
+              btnText.includes('9:16') || btnText.includes('16:9') ||
+              btnText.includes('สัดส่วนภาพ')) {
             aspectRatioButton = btn;
             this.log(`找到裁剪比例下拉按钮: "${btnText}"`, 'info');
             break;
           }
         }
-
+        
+        // Fallback: Try to find by label text "สัดส่วนภาพ" if not found in button text
+        if (!aspectRatioButton) {
+             const labels = Array.from(document.querySelectorAll('span, div, p')).filter(el => 
+               (el.textContent || el.innerText || '').includes('สัดส่วนภาพ')
+             );
+             for (const label of labels) {
+               // Find closest button or button in next sibling
+               const btn = label.closest('button') || 
+                           label.closest('[role="combobox"]') ||
+                           (label.parentElement ? label.parentElement.querySelector('button') : null);
+               if (btn) {
+                 aspectRatioButton = btn;
+                 this.log(`Found dropdown via label "สัดส่วนภาพ"`, 'info');
+                 break;
+               }
+             }
+        }
+        
         if (!aspectRatioButton) {
           this.log('未找到裁剪比例下拉按钮', 'warning');
           this.logToPopup('⚠️ 未找到裁剪比例下拉按钮，使用默认设置', 'warning');
         } else {
           const currentText = (aspectRatioButton.textContent || aspectRatioButton.innerText || '').trim();
-          const isAlreadySelected = currentText.includes(targetText) && currentText.includes(targetRatio);
-
+          // Enhanced check for already selected state
+          const isAlreadySelected = (currentText.includes(targetText) || currentText.includes(targetRatio)) ||
+                                    (isPortrait && (currentText.includes('แนวตั้ง') || currentText.includes('9:16'))) ||
+                                    (!isPortrait && (currentText.includes('แนวนอน') || currentText.includes('16:9')));
+          
           this.log(`当前选中的比例: "${currentText}", 目标: "${targetText} (${targetRatio})"`, 'info');
-
+          
           if (!isAlreadySelected) {
             // 需要切换：点击按钮打开下拉菜单
             this.log('点击下拉按钮打开菜单...', 'info');
             await this.clickElement(aspectRatioButton);
             await this.sleep(800); // 等待下拉菜单完全打开
-
+            
             // 在下拉菜单中查找目标选项
             let optionFound = false;
-
+            
             // 策略1: 通过 aria-controls 查找菜单
             const ariaControls = aspectRatioButton.getAttribute('aria-controls');
             if (ariaControls) {
@@ -1443,15 +1466,19 @@ class FlowBatchContentScript {
                 this.log('找到菜单容器，搜索选项...', 'info');
                 const options = menu.querySelectorAll('button, [role="option"], div[role="option"]');
                 this.log(`菜单中找到 ${options.length} 个选项`, 'info');
-
+                
                 for (const opt of options) {
                   const optText = (opt.textContent || opt.innerText || '').trim();
                   const optIcons = opt.querySelectorAll('i');
-
+                  
                   // 检查文本和图标是否匹配
-                  let hasTargetText = optText.includes(targetText) || optText.includes(targetRatio);
+                  // Enhanced option text matching
+                  let hasTargetText = optText.includes(targetText) || optText.includes(targetRatio) ||
+                                      (isPortrait && (optText.includes('แนวตั้ง') || optText.includes('9:16'))) ||
+                                      (!isPortrait && (optText.includes('แนวนอน') || optText.includes('16:9')));
+                                      
                   let hasTargetIcon = false;
-
+                  
                   for (const icon of optIcons) {
                     const iconContent = (icon.textContent || icon.innerText || '').trim();
                     if (iconContent.includes(iconText)) {
@@ -1459,7 +1486,7 @@ class FlowBatchContentScript {
                       break;
                     }
                   }
-
+                  
                   // 如果文本和图标都匹配，或者文本包含目标比例，则选择
                   if (hasTargetText && (hasTargetIcon || optText.includes(targetRatio))) {
                     this.log(`找到目标选项: "${optText}"`, 'success');
@@ -1473,31 +1500,33 @@ class FlowBatchContentScript {
                 }
               }
             }
-
+            
             // 策略2: 如果没找到，在所有可见的按钮/选项中搜索（排除已点击的按钮）
             if (!optionFound) {
               this.log('策略1未找到，尝试策略2: 搜索所有可见选项...', 'info');
               const allOpts = document.querySelectorAll('button, [role="option"], div[role="option"]');
-
+              
               for (const opt of allOpts) {
                 // 跳过下拉按钮本身
                 if (opt === aspectRatioButton) continue;
-
+                
                 // 检查元素是否可见
                 const rect = opt.getBoundingClientRect();
-                const isVisible = rect.width > 0 && rect.height > 0 &&
-                  window.getComputedStyle(opt).display !== 'none';
+                const isVisible = rect.width > 0 && rect.height > 0 && 
+                                 window.getComputedStyle(opt).display !== 'none';
                 if (!isVisible) continue;
-
+                
                 const optText = (opt.textContent || opt.innerText || '').trim();
-                if (!optText.includes('Portrait') && !optText.includes('Landscape') &&
-                  !optText.includes('9:16') && !optText.includes('16:9')) {
+                // Enhanced filter for valid options
+                if (!optText.includes('Portrait') && !optText.includes('Landscape') && 
+                    !optText.includes('9:16') && !optText.includes('16:9') &&
+                    !optText.includes('แนวนอน') && !optText.includes('แนวตั้ง')) {
                   continue;
                 }
-
+                
                 const optIcons = opt.querySelectorAll('i');
                 let hasTargetIcon = false;
-
+                
                 for (const icon of optIcons) {
                   const iconContent = (icon.textContent || icon.innerText || '').trim();
                   if (iconContent.includes(iconText)) {
@@ -1505,9 +1534,12 @@ class FlowBatchContentScript {
                     break;
                   }
                 }
-
+                
                 // 检查是否匹配目标
-                const matchesText = optText.includes(targetText) || optText.includes(targetRatio);
+                const matchesText = optText.includes(targetText) || optText.includes(targetRatio) ||
+                                    (isPortrait && (optText.includes('แนวตั้ง') || optText.includes('9:16'))) ||
+                                    (!isPortrait && (optText.includes('แนวนอน') || optText.includes('16:9')));
+                                    
                 if (matchesText && (hasTargetIcon || optText.includes(targetRatio))) {
                   this.log(`策略2找到目标选项: "${optText}"`, 'success');
                   await this.clickElement(opt);
@@ -1517,7 +1549,7 @@ class FlowBatchContentScript {
                 }
               }
             }
-
+            
             if (optionFound) {
               this.log(`✅ 已选择裁剪比例: ${targetText} (${targetRatio})`, 'success');
               this.logToPopup(`✅ 已设置裁剪比例: ${targetText} (${targetRatio})`, 'success');
@@ -1525,8 +1557,8 @@ class FlowBatchContentScript {
               this.log(`⚠️ 未找到目标选项 ${targetText} (${targetRatio})，可能已选中或菜单未正确打开`, 'warning');
               this.logToPopup(`⚠️ 未找到裁剪比例选项，可能已选中`, 'warning');
             }
-
-            await this.sleep(600);
+            
+            await this.sleep(400);
           } else {
             this.log(`✅ 裁剪比例已正确设置: ${targetText} (${targetRatio})`, 'success');
             this.logToPopup(`✅ 裁剪比例已正确: ${targetText} (${targetRatio})`, 'success');
@@ -1538,18 +1570,51 @@ class FlowBatchContentScript {
       }
     }
 
-    // 3. 点击保存按钮
     try {
-      const saveButton = await this.waitForElement(
-        '//button[contains(normalize-space(.), "Crop and Save")]',
-        6000
-      );
+      const saveButton = await this.findCropSaveButton();
+      if (!saveButton) throw new Error('未找到裁剪保存按钮');
       await this.clickElement(saveButton);
       await this.sleep(800);
       this.log('裁剪完成', 'success');
     } catch (error) {
       this.log(`裁剪保存失败: ${error.message}`, 'error');
     }
+  }
+
+  async findCropSaveButton() {
+    const strategies = [
+      '//button[contains(normalize-space(.), "ครอบตัดและบันทึก")]',
+      '//button[contains(normalize-space(.), "Crop and Save")]',
+      '//button[contains(normalize-space(.), "裁剪并保存")]',
+      '//button[contains(normalize-space(.), "裁剪保存")]',
+      '//button[.//i[contains(text(), "crop")] and (contains(normalize-space(.), "Save") or contains(normalize-space(.), "บันทึก") or contains(normalize-space(.), "保存"))]',
+      '//button[.//i[contains(@class, "material-icons") and contains(text(), "crop")] and (contains(normalize-space(.), "Save") or contains(normalize-space(.), "บันทึก") or contains(normalize-space(.), "保存"))]'
+    ];
+    for (let i = 0; i < strategies.length; i++) {
+      try {
+        const btn = await this.waitForElement(strategies[i], 1500);
+        if (btn) return btn;
+      } catch (_) {}
+    }
+    const candidates = Array.from(document.querySelectorAll('button'));
+    const visibleButtons = candidates.filter(b => {
+      const r = b.getBoundingClientRect();
+      const v = r.width > 0 && r.height > 0 && window.getComputedStyle(b).display !== 'none' && window.getComputedStyle(b).visibility !== 'hidden';
+      return v;
+    });
+    const byIconAndText = visibleButtons.find(b => {
+      const t = (b.textContent || b.innerText || '').trim();
+      const hasIcon = Array.from(b.querySelectorAll('i')).some(i => (i.textContent || i.innerText || '').includes('crop'));
+      return hasIcon && (t.includes('Save') || t.includes('บันทึก') || t.includes('保存'));
+    });
+    if (byIconAndText) return byIconAndText;
+    const byThai = visibleButtons.find(b => (b.textContent || b.innerText || '').includes('บันทึก'));
+    if (byThai) return byThai;
+    const byCn = visibleButtons.find(b => (b.textContent || b.innerText || '').includes('保存'));
+    if (byCn) return byCn;
+    const byEn = visibleButtons.find(b => (b.textContent || b.innerText || '').includes('Save'));
+    if (byEn) return byEn;
+    return null;
   }
 
   // Find Add button with multiple strategies
@@ -1588,8 +1653,8 @@ class FlowBatchContentScript {
     const allButtons = document.querySelectorAll('button');
     for (const button of allButtons) {
       if (button.textContent.includes('add') ||
-        button.innerText.includes('add') ||
-        button.querySelector('i')?.textContent?.includes('add')) {
+          button.innerText.includes('add') ||
+          button.querySelector('i')?.textContent?.includes('add')) {
         this.log('Found button containing add text/icon', 'success');
         return button;
       }
@@ -1653,16 +1718,16 @@ class FlowBatchContentScript {
 
     // Set prompt value directly (much faster)
     textarea.value = prompt;
-
+    
     // Trigger events to notify the page
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
     textarea.dispatchEvent(new Event('change', { bubbles: true }));
-
+    
     // Also trigger keyboard events for better compatibility
     textarea.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
     textarea.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-
-    await this.sleep(800); // Increased to avoid rate limiting
+    
+    await this.sleep(300); // Reduced from 500ms
   }
 
   async submitForGeneration() {
@@ -1711,50 +1776,9 @@ class FlowBatchContentScript {
 
     this.log('Clicking submit button...', 'info');
     await this.clickElement(submitButton);
-    this.log('Submit button clicked, checking for errors...', 'info');
+    await this.sleep(1500);
 
-    // === Fast Error Detection (Rate Limit + Video Generation Failure) ===
-    // Poll for errors quickly (1s interval, max 5 attempts = 5s total)
-    let submissionError = null;
-    const maxAttempts = FlowBatchContentScript.CONFIG.ERROR_POLL_MAX_ATTEMPTS || 5;
-    const pollInterval = FlowBatchContentScript.CONFIG.ERROR_POLL_INTERVAL || 1000;
-
-    for (let i = 0; i < maxAttempts && !submissionError; i++) {
-      await this.sleep(pollInterval);
-      submissionError = await this.detectSubmissionError();
-      if (submissionError) {
-        this.log(`Error detected on attempt ${i + 1}/${maxAttempts}`, 'warning');
-        break;
-      }
-    }
-
-    if (submissionError) {
-      // Error detected
-      const errorType = submissionError.type;
-      const errorMessage = submissionError.message;
-
-      if (errorType === 'rate_limit') {
-        this.log(`⚠️ 检测到请求太快错误: ${errorMessage}`, 'warning');
-        this.logToPopup(`⏸️ 请求太快，等待${FlowBatchContentScript.CONFIG.RATE_LIMIT_RETRY_DELAY / 1000}秒后重试`, 'warning');
-
-        // Wait before retrying
-        await this.sleep(FlowBatchContentScript.CONFIG.RATE_LIMIT_RETRY_DELAY);
-
-        // Throw RetryTaskError to signal that this task should be retried
-        throw new RetryTaskError(`Rate limit detected: ${errorMessage}`);
-      } else if (errorType === 'video_generation_failed') {
-        this.log(`⚠️ 检测到视频生成失败: ${errorMessage}`, 'warning');
-        this.logToPopup(`⏸️ 视频生成失败，等待${FlowBatchContentScript.CONFIG.RATE_LIMIT_RETRY_DELAY / 1000}秒后重试`, 'warning');
-
-        // Wait before retrying
-        await this.sleep(FlowBatchContentScript.CONFIG.RATE_LIMIT_RETRY_DELAY);
-
-        // Throw RetryTaskError to signal that this task should be retried
-        throw new RetryTaskError(`Video generation failed: ${errorMessage}`);
-      }
-    }
-
-    this.log('Submit button clicked successfully, no errors detected', 'success');
+    this.log('Submit button clicked successfully', 'success');
   }
 
   // Find submit/generate button with multiple strategies
@@ -1812,7 +1836,7 @@ class FlowBatchContentScript {
       const hasArrowIcon = iconElement && iconElement.textContent.includes('arrow_forward');
 
       if (isVisible && isEnabled &&
-        (text.includes('generate') || text.includes('create') || text.includes('submit') || hasArrowIcon)) {
+          (text.includes('generate') || text.includes('create') || text.includes('submit') || hasArrowIcon)) {
         this.log('Found generation button via fallback search', 'success');
         if (hasArrowIcon) {
           this.log('Button identified by arrow_forward icon', 'info');
@@ -1894,7 +1918,7 @@ class FlowBatchContentScript {
       taskIndex = this.currentTaskPointer - 1;
       this.log(`⚠️ waitForGeneration 未传入 taskIndex，使用 currentTaskPointer: ${taskIndex}`, 'warning');
     }
-
+    
     this.log(`等待任务 ${taskIndex + 1} 的视频生成完成...`, 'info');
     const startTime = Date.now();
     const maxWait = FlowBatchContentScript.CONFIG.VIDEO_GENERATION_TIMEOUT;
@@ -1902,42 +1926,18 @@ class FlowBatchContentScript {
     // 使用传入的 videoCountBeforeSubmit，如果没有则记录当前视频数量
     let initialVideoCount = videoCountBeforeSubmit;
     let container = null;
-
+    
     // 等待结果容器出现
     while (Date.now() - startTime < maxWait) {
       try {
-        // Try multiple possible container selectors (looking for the main container that holds ALL result items)
-        const strategies = [
-          '//div[contains(@class, "generated-results")]',  // Original
-          '//div[contains(@class, "results")]',            // Fallback 1
-          '//div[contains(@class, "output")]',             // Fallback 2
-          '//div[contains(@class, "gallery")]',            // Fallback 3
-          '//div[contains(@class, "videos")]',             // Fallback 4
-          '//*[contains(text(), "Generated")]/ancestor::div[1]', // Text-based
-          '//div[@data-testid="virtuoso-item-list"]',      // Main results container (most accurate)
-          '//div[contains(@class, "sc-c884da2c-5")]',      // Virtuoso list container by class
-          '//div[count(./div[@data-index]) > 2]',         // Container with multiple data-index children (threshold > 2)
-          '//div[count(.//video) > 1]',                    // Container with multiple videos
-          '//div[@data-index]/ancestor::div[count(.//div[@data-index]) > 2]', // Find parent with multiple results
-          '//body//div[contains(@class, "sc-") and .//video and count(.//video) > 1]', // Any sc- container with multiple videos
-        ];
-
-        for (let i = 0; i < strategies.length; i++) {
-          try {
-            container = await this.waitForElement(strategies[i], 3000);
-            if (container) {
-              this.log(`Found results container using strategy ${i + 1}: ${strategies[i]}`, 'success');
-              break;
-            }
-          } catch (e) {
-            // Continue with next strategy
-          }
-        }
-
+        container = await this.waitForElement(
+          '//div[contains(@class, "generated-results")]',
+          2000
+        );
         if (container) {
           // 如果没有传入 videoCountBeforeSubmit，记录当前视频数量
           if (initialVideoCount === 0) {
-            const initialCards = container.querySelectorAll('div[data-index]');
+            const initialCards = container.querySelectorAll('div[data-result-index]');
             initialVideoCount = initialCards.length;
             this.log(`结果容器找到，当前已有 ${initialVideoCount} 个视频`, 'info');
           } else {
@@ -1962,64 +1962,10 @@ class FlowBatchContentScript {
 
     while (Date.now() - startTime < maxWait) {
       attempts++;
-
-      // Progress logging (every 15 seconds = 15 attempts)
-      if (attempts % 15 === 0) {
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-        const remaining = ((maxWait - (Date.now() - startTime)) / 1000).toFixed(0);
-        this.log(`⏳ 等待视频生成... 已等待${elapsed}秒，剩余${remaining}秒`, 'info');
-        this.logToPopup(`⏳ 任务 ${targetIndex + 1} 生成中... (${elapsed}s/${(maxWait / 1000).toFixed(0)}s)`, 'info');
-      }
-
-      // CRITICAL FIX: Check pause status during waiting
-      const currentState = await this.loadQueueState();
-      if (!currentState || !currentState.running || currentState.paused) {
-        this.log(`Task ${taskIndex + 1} generation waiting aborted due to pause/stop`, 'warning');
-        return null;
-      }
-
-      // 查找所有结果卡片（使用正确的选择器）
-      let cards = Array.from(container.querySelectorAll('div[data-index]'));
-
-      // 过滤掉日期分隔符等非视频元素
-      cards = cards.filter(card => {
-        const hasVideo = card.querySelector('video') !== null;
-        const hasProgress = /\d+%/.test(card.textContent);
-        const hasCardClass = card.querySelector('.sc-95642653-0, .sc-20145656-0') !== null;
-        return hasVideo || hasProgress || hasCardClass;
-      });
-
-      // 如果找到卡片，记录日志
-      if (cards.length > 0 && attempts === 1) {
-        this.log(`✅ 找到 ${cards.length} 个视频卡片（data-index）`, 'success');
-      }
-
-      // 降级策略1: 直接查找video父元素
+      
+      // 查找所有结果卡片
+      const cards = container.querySelectorAll('div[data-result-index]');
       if (cards.length === 0) {
-        const videoDivs = container.querySelectorAll('div:has(video)');
-        if (videoDivs.length > 0) {
-          cards = Array.from(videoDivs);
-          this.log(`⚠️ 使用降级策略: div:has(video) (${cards.length}个)`, 'warning');
-        }
-      }
-
-      // 降级策略2: 查找进度文本
-      if (cards.length === 0) {
-        const allDivs = Array.from(container.querySelectorAll('div'));
-        cards = allDivs.filter(div => {
-          const text = div.textContent.trim();
-          return /^\d+%$/.test(text) && div.offsetHeight > 50;
-        }).map(div => div.closest('div[data-index]')).filter(Boolean);
-
-        if (cards.length > 0) {
-          this.log(`⚠️ 使用降级策略: 进度文本 (${cards.length}个)`, 'warning');
-        }
-      }
-
-      if (cards.length === 0) {
-        if (attempts % 10 === 0) {
-          this.log(`⚠️ 未检测到视频卡片，继续等待... (已尝试${attempts}次)`, 'warning');
-        }
         await this.sleep(1000);
         continue;
       }
@@ -2050,127 +1996,70 @@ class FlowBatchContentScript {
         } else if (cards.length > 0) {
           // 如果视频数量没有增加，可能是页面刷新了，使用最后一个作为后备方案
           targetCard = cards[cards.length - 1];
-          if (attempts % 10 === 0) { // Log throttle
-            this.log(`⚠️ 视频数量未增加，使用最新的视频作为后备方案（任务 ${targetIndex + 1}）`, 'warning');
-          }
+          this.log(`⚠️ 视频数量未增加，使用最新的视频作为后备方案（任务 ${targetIndex + 1}）`, 'warning');
         }
       }
 
       if (targetCard) {
-        // === CRITICAL: Check video status first ===
-        // Check for "Failed Generation" status
-        const statusElement = targetCard.querySelector('.sc-20145656-10');
-        if (statusElement) {
-          const statusText = statusElement.textContent.trim();
-
-          // Check if generation failed
-          if (statusText.includes('Failed Generation')) {
-            this.log(`❌ 任务 ${targetIndex + 1} 生成失败，触发重试`, 'error');
-            this.logToPopup(`❌ 任务 ${targetIndex + 1} 生成失败，将自动重试`, 'error');
-            throw new RetryTaskError(`Video generation failed for task ${targetIndex + 1}`);
-          }
-
-          // Check if still generating (shows percentage)
-          const progressElement = targetCard.querySelector('.sc-dd6abb21-1');
-          if (progressElement) {
-            const progressText = progressElement.textContent.trim();
-            if (/^\d+%$/.test(progressText)) {
-              // Still generating, continue waiting
-              if (attempts % 10 === 0) {
-                this.log(`⏳ 任务 ${targetIndex + 1} 生成中: ${progressText}`, 'info');
-              }
-              await this.sleep(1000);
-              continue;
-            }
-          }
-        }
-
-        // === Enhanced Video Detection with Fallback Strategies ===
-        // Strategy 1: Standard querySelector('video')
+        // 查找视频元素
         video = targetCard.querySelector('video');
-
-        if (!video) {
-          // Strategy 2: querySelectorAll and pick first valid video
-          const allVideos = targetCard.querySelectorAll('video');
-          if (allVideos.length > 0) {
-            video = allVideos[0];
-            this.log(`⚠️ 使用降级策略找到video (方法2: querySelectorAll, 共${allVideos.length}个)`, 'warning');
-          }
-        }
-
+        
         if (video) {
-          // Check if video has valid src
-          const hasSrc = video.src && video.src.trim() !== '' && !video.src.includes('blob:null');
+          // 检查视频是否有有效的 src
+          if (video.src && video.src.trim() !== '' && !video.src.includes('blob:null')) {
+            // 等待视频加载完成（可以播放）
+            if (video.readyState >= 3) { // HAVE_FUTURE_DATA 或更高
+              // 验证视频真的可以播放
+              try {
+                await new Promise((resolve, reject) => {
+                  const timeout = setTimeout(() => {
+                    reject(new Error('视频加载超时'));
+                  }, FlowBatchContentScript.CONFIG.VIDEO_LOAD_TIMEOUT);
 
-          if (hasSrc) {
-            // CRITICAL FIX: Don't wait for readyState >= 3 passively. 
-            // If we have a src, force load it immediately to verify it's valid.
-            // This prevents waiting 200s for preload="none" videos.
+                  // CRITICAL FIX: Properly clean up event listeners and timeout
+                  const checkReady = () => {
+                    if (video.readyState >= 3 && video.duration > 0) {
+                      clearTimeout(timeout);
+                      // Remove event listeners to prevent memory leaks
+                      video.removeEventListener('loadeddata', checkReady);
+                      video.removeEventListener('canplay', checkReady);
+                      resolve();
+                    }
+                  };
 
-            try {
-              await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => {
-                  reject(new Error('视频加载超时'));
-                }, FlowBatchContentScript.CONFIG.VIDEO_LOAD_TIMEOUT);
-
-                // CRITICAL FIX: Properly clean up event listeners and timeout
-                const checkReady = () => {
                   if (video.readyState >= 3 && video.duration > 0) {
                     clearTimeout(timeout);
-                    // Remove event listeners to prevent memory leaks
-                    video.removeEventListener('loadeddata', checkReady);
-                    video.removeEventListener('canplay', checkReady);
                     resolve();
+                  } else {
+                    // Add event listeners with proper cleanup
+                    video.addEventListener('loadeddata', checkReady, { once: true });
+                    video.addEventListener('canplay', checkReady, { once: true });
+                    video.addEventListener('error', () => {
+                      clearTimeout(timeout);
+                      video.removeEventListener('loadeddata', checkReady);
+                      video.removeEventListener('canplay', checkReady);
+                      reject(new Error('视频加载错误'));
+                    }, { once: true });
+                    video.load(); // 触发加载
                   }
-                };
+                });
 
-                if (video.readyState >= 3 && video.duration > 0) {
-                  clearTimeout(timeout);
-                  resolve();
-                } else {
-                  // Add event listeners with proper cleanup
-                  video.addEventListener('loadeddata', checkReady, { once: true });
-                  video.addEventListener('canplay', checkReady, { once: true });
-                  video.addEventListener('error', () => {
-                    clearTimeout(timeout);
-                    video.removeEventListener('loadeddata', checkReady);
-                    video.removeEventListener('canplay', checkReady);
-                    reject(new Error('视频加载错误'));
-                  }, { once: true });
-
-                  // FORCE LOAD: This is the key to avoiding the 200s wait
-                  video.load();
-                }
-              });
-
-              // 视频已加载完成
-              this.log(`✅ 视频生成完成 (任务 ${targetIndex + 1}): ${video.src.substring(0, 50)}...`, 'success');
-              return video.src;
-            } catch (error) {
-              // Only log warning if we've been waiting a while, to avoid spamming
-              if (attempts % 10 === 0) {
+                // 视频已加载完成
+                this.log(`✅ 视频生成完成 (任务 ${targetIndex + 1}): ${video.src.substring(0, 50)}...`, 'success');
+                return video.src;
+              } catch (error) {
                 this.log(`视频加载检查失败: ${error.message}，继续等待...`, 'warning');
+              }
+            } else {
+              // 视频还在加载中
+              if (attempts % 10 === 0) {
+                this.log(`视频加载中... (readyState: ${video.readyState})`, 'info');
               }
             }
           } else {
-            // === Strategy 3: Video element exists but src is empty ===
-            // Wait longer for src to load
+            // 视频还没有有效的 src
             if (attempts % 10 === 0) {
               this.log('等待视频生成...', 'info');
-            }
-
-            // Every 5 attempts (5 seconds), try waiting extra time for src to populate
-            if (attempts > 0 && attempts % 5 === 0) {
-              this.log(`⚠️ 视频元素存在但src为空，等待${FlowBatchContentScript.CONFIG.VIDEO_SRC_LOAD_WAIT / 1000}秒让src加载...`, 'warning');
-              await this.sleep(FlowBatchContentScript.CONFIG.VIDEO_SRC_LOAD_WAIT);
-
-              // Check again after waiting
-              if (video.src && video.src.trim() !== '' && !video.src.includes('blob:null')) {
-                this.log(`✅ 延迟等待后src已加载: ${video.src.substring(0, 50)}...`, 'success');
-                return video.src;
-              } else {
-                this.log(`⚠️ 延迟等待后src仍为空，继续等待`, 'warning');
-              }
             }
           }
         }
@@ -2193,16 +2082,16 @@ class FlowBatchContentScript {
   async waitForTaskCompletion(taskIndex, prompt, videoCountBeforeSubmit = 0) {
     try {
       this.log(`任务 ${taskIndex + 1} 开始等待生成完成...`, 'info');
-      this.logToPopup(`⏳ 任务 ${taskIndex + 1} 等待生成完成（约2分钟）...`, 'info');
-
+      this.logToPopup(`⏳ 任务 ${taskIndex + 1} 等待生成完成（约1分钟）...`, 'info');
+      
       // Step 1: 等待视频真正生成完成（视频加载完成，可以播放）
       // CRITICAL FIX: 传入 taskIndex 和 videoCountBeforeSubmit 确保下载正确的视频
       const downloadUrl = await this.waitForGeneration(taskIndex, videoCountBeforeSubmit);
-
+      
       // Step 2: 视频生成完成后，立即下载
       this.log(`任务 ${taskIndex + 1} 视频生成完成，开始下载...`, 'info');
       this.logToPopup(`📥 任务 ${taskIndex + 1} 开始下载...`, 'info');
-
+      
       // CRITICAL FIX: Wait for download to complete before updating success count
       try {
         await this.downloadVideo(downloadUrl, taskIndex, prompt);
@@ -2222,16 +2111,16 @@ class FlowBatchContentScript {
         // Use atomic update instead of modifying state object
         const currentSuccessCount = state.successCount || 0;
         const currentPendingTasks = state.pendingTasks || 0;
-
+        
         // CRITICAL FIX: Update success count only after video generation and download request
         const newSuccessCount = currentSuccessCount + 1;
         const newPendingTasks = Math.max(0, currentPendingTasks - 1);
-
+        
         await this.updateQueueState({
           successCount: newSuccessCount,
           pendingTasks: newPendingTasks
         });
-
+        
         // CRITICAL FIX: Verify the update was successful to ensure accuracy
         const verifyState = await this.loadQueueState();
         if (verifyState) {
@@ -2240,7 +2129,7 @@ class FlowBatchContentScript {
             this.log(`⚠️ 成功计数更新不一致: 期望=${newSuccessCount}, 实际=${actualSuccessCount}，重新更新...`, 'warning');
             // Retry update with force
             await this.updateQueueState({ successCount: newSuccessCount });
-
+            
             // Verify again
             const retryState = await this.loadQueueState();
             if (retryState && retryState.successCount !== newSuccessCount) {
@@ -2250,13 +2139,13 @@ class FlowBatchContentScript {
             }
           }
         }
-
+        
         // Log the update for debugging
         const finalState = await this.loadQueueState();
         const finalSuccessCount = finalState?.successCount || 0;
         this.log(`✅ 状态更新成功: 成功=${finalSuccessCount}, 队列=${newPendingTasks} (任务 ${taskIndex + 1})`, 'success');
         this.logToPopup(`✅ 任务 ${taskIndex + 1} 完成 (成功: ${finalSuccessCount})`, 'success');
-
+        
         const queueLimit = FlowBatchContentScript.CONFIG.QUEUE_LIMIT;
         if (newPendingTasks < queueLimit) {
           this.logToPopup(`✅ 队列有空闲 (${newPendingTasks}/${queueLimit})，可以继续发送`, 'success');
@@ -2265,7 +2154,7 @@ class FlowBatchContentScript {
     } catch (error) {
       this.log(`❌ 任务 ${taskIndex + 1} 完成处理失败: ${error.message}`, 'error');
       this.logToPopup(`❌ 任务 ${taskIndex + 1} 失败: ${error.message}`, 'error');
-
+      
       // CRITICAL FIX: Atomic update even on error
       const state = await this.loadQueueState();
       if (state) {
@@ -2399,455 +2288,6 @@ class FlowBatchContentScript {
   }
 
   // ===============================
-  // ERROR DETECTION
-  // ===============================
-
-  /**
-   * Detect submission errors on the page (rate limit, video generation failure, etc.)
-   * Returns error message if detected, null otherwise
-   * CRITICAL FIX: Excludes script/style/noscript tags to avoid false positives from Next.js data
-   */
-  async detectSubmissionError() {
-    // === Error Type 1: Rate Limit ===
-
-    // Method 1 (PRIORITY): Check known error container with visibility check
-    // <div class="sc-76c40d50-2 kHGbiV">You're requesting generations too quickly...</div>
-    const errorDiv = document.querySelector('div.sc-76c40d50-2.kHGbiV');
-    if (errorDiv && errorDiv.offsetParent !== null) {  // Check visibility
-      const text = errorDiv.textContent.trim();
-      if (text.includes('requesting generations too quickly')) {
-        this.log(`检测到rate limit错误 (方法1-Visible Container): ${text}`, 'warning');
-        return { type: 'rate_limit', message: text };
-      }
-      if (text.includes('Couldn\'t generate video')) {
-        this.log(`检测到视频生成失败错误 (方法1-Visible Container): ${text}`, 'warning');
-        return { type: 'video_generation_failed', message: text };
-      }
-    }
-
-    // Method 2: XPath with script/style exclusion for rate limit
-    const rateLimitText = "You're requesting generations too quickly";
-    const rateLimitXPath = `//*[
-      not(self::script) and
-      not(self::style) and
-      not(self::noscript) and
-      not(ancestor::script) and
-      not(ancestor::style) and
-      contains(text(), "${rateLimitText}")
-    ]`;
-    const rateLimitElement = document.evaluate(
-      rateLimitXPath,
-      document,
-      null,
-      XPathResult.FIRST_ORDERED_NODE_TYPE,
-      null
-    ).singleNodeValue;
-
-    if (rateLimitElement && rateLimitElement.offsetParent !== null) {  // Check visibility
-      const fullText = rateLimitElement.textContent.trim();
-      const tagName = rateLimitElement.tagName.toLowerCase();
-      this.log(`检测到rate limit错误 (方法2-XPath, tag: ${tagName}): ${fullText.substring(0, 100)}...`, 'warning');
-      return { type: 'rate_limit', message: fullText };
-    }
-
-    // Method 3: Fallback keywords for rate limit (with script exclusion)
-    const rateLimitKeywords = ['requesting generations too quickly', 'too quickly', 'wait a moment'];
-    for (const keyword of rateLimitKeywords) {
-      const xp = `//*[
-        not(self::script) and
-        not(self::style) and
-        not(self::noscript) and
-        not(ancestor::script) and
-        not(ancestor::style) and
-        contains(text(), "${keyword}")
-      ]`;
-      const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-      if (el && el.offsetParent !== null) {  // Check visibility
-        const fullText = el.textContent.trim();
-        const tagName = el.tagName.toLowerCase();
-        this.log(`检测到rate limit错误 (方法3-Keyword:'${keyword}', tag: ${tagName}): ${fullText.substring(0, 100)}...`, 'warning');
-        return { type: 'rate_limit', message: fullText };
-      }
-    }
-
-    // === Error Type 2: Video Generation Failure ===
-
-    // Method 1: XPath with script/style exclusion for video generation failure
-    const videoFailText = "Couldn't generate video";
-    const videoFailXPath = `//*[
-      not(self::script) and
-      not(self::style) and
-      not(self::noscript) and
-      not(ancestor::script) and
-      not(ancestor::style) and
-      contains(text(), "${videoFailText}")
-    ]`;
-    const videoFailElement = document.evaluate(
-      videoFailXPath,
-      document,
-      null,
-      XPathResult.FIRST_ORDERED_NODE_TYPE,
-      null
-    ).singleNodeValue;
-
-    if (videoFailElement && videoFailElement.offsetParent !== null) {  // Check visibility
-      const fullText = videoFailElement.textContent.trim();
-      const tagName = videoFailElement.tagName.toLowerCase();
-      this.log(`检测到视频生成失败错误 (方法2-XPath, tag: ${tagName}): ${fullText.substring(0, 100)}...`, 'warning');
-      return { type: 'video_generation_failed', message: fullText };
-    }
-
-    // Method 2: Fallback keywords for video generation failure (with script exclusion)
-    const videoFailKeywords = ['Couldn\'t generate video', 'generate video', 'Try again later'];
-    for (const keyword of videoFailKeywords) {
-      const xp = `//*[
-        not(self::script) and
-        not(self::style) and
-        not(self::noscript) and
-        not(ancestor::script) and
-        not(ancestor::style) and
-        contains(text(), "${keyword}")
-      ]`;
-      const el = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-      if (el && el.offsetParent !== null && el.textContent.includes('Couldn\'t generate video')) {  // Check visibility
-        const fullText = el.textContent.trim();
-        const tagName = el.tagName.toLowerCase();
-        this.log(`检测到视频生成失败错误 (方法3-Keyword:'${keyword}', tag: ${tagName}): ${fullText.substring(0, 100)}...`, 'warning');
-        return { type: 'video_generation_failed', message: fullText };
-      }
-    }
-
-    // No error detected
-    return null;
-  }
-
-  // ===============================
-  // FLOW BATCH DOWNLOADER
-  // ===============================
-
-  // 初始化批量下载器
-  initBatchDownloader() {
-    this.videoItems = [];
-    this.videoUrlSet = new Set();
-    this.downloadPanel = null;
-    this.downloadObserver = null;
-
-    this.scanForVideos();
-    this.startVideoObserver();
-    this.createDownloadButton();
-  }
-
-  // 扫描页面中的视频
-  scanForVideos() {
-    this.videoItems = [];
-    this.videoUrlSet.clear();
-
-    const videos = document.querySelectorAll('video');
-    videos.forEach(video => this.addVideoItem(video));
-
-    this.log(`扫描到 ${this.videoItems.length} 个视频`, 'info');
-  }
-
-  // 添加视频项
-  addVideoItem(videoEl) {
-    if (!(videoEl instanceof HTMLVideoElement)) return false;
-
-    let videoUrl = videoEl.src || videoEl.currentSrc || '';
-    if (!videoUrl) {
-      const source = videoEl.querySelector('source');
-      if (source && source.src) videoUrl = source.src;
-    }
-
-    if (!videoUrl) return false;
-
-    const key = this.sanitizeUrl(videoUrl);
-    if (this.videoUrlSet.has(key)) return false;
-
-    const posterUrl = videoEl.poster || '';
-    const item = {
-      index: this.videoItems.length + 1,
-      key,
-      videoUrl,
-      posterUrl,
-      element: videoEl,
-      selected: false,
-      name: `flow_video_${this.videoItems.length + 1}`
-    };
-
-    this.videoItems.push(item);
-    this.videoUrlSet.add(key);
-    return true;
-  }
-
-  // URL标准化
-  sanitizeUrl(url) {
-    try {
-      const u = new URL(url, location.href);
-      return `${u.origin}${u.pathname}`;
-    } catch {
-      return String(url).split('#')[0].split('?')[0];
-    }
-  }
-
-  // 启动视频观察器
-  startVideoObserver() {
-    if (this.downloadObserver) return;
-
-    this.downloadObserver = new MutationObserver(mutations => {
-      let added = 0;
-      for (const mutation of mutations) {
-        mutation.addedNodes && mutation.addedNodes.forEach(node => {
-          if (node.nodeType !== 1) return;
-
-          if (node.matches && node.matches('video')) {
-            if (this.addVideoItem(node)) added++;
-          }
-
-          const videos = node.querySelectorAll ? node.querySelectorAll('video') : [];
-          videos && videos.forEach(v => { if (this.addVideoItem(v)) added++; });
-        });
-      }
-
-      if (added > 0 && this.downloadPanel) {
-        this.renderVideoList();
-      }
-    });
-
-    this.downloadObserver.observe(document.body, { childList: true, subtree: true });
-  }
-
-  // 创建下载按钮
-  createDownloadButton() {
-    if (document.getElementById('flow-batch-downloader-btn')) return;
-
-    const button = document.createElement('button');
-    button.id = 'flow-batch-downloader-btn';
-    button.className = 'flow-batch-downloader-btn';
-    button.innerHTML = '📥';
-    button.title = 'Flow批量下载器';
-
-    // 拖拽功能
-    let isDragging = false;
-    let startX, startY, initialLeft, initialBottom;
-
-    const startDrag = (clientX, clientY) => {
-      isDragging = true;
-      startX = clientX;
-      startY = clientY;
-      const rect = button.getBoundingClientRect();
-      initialLeft = rect.left;
-      initialBottom = window.innerHeight - rect.bottom;
-      button.style.cursor = 'grabbing';
-    };
-
-    const drag = (clientX, clientY) => {
-      if (!isDragging) return;
-
-      const deltaX = clientX - startX;
-      const deltaY = clientY - startY;
-
-      const newLeft = Math.max(0, Math.min(window.innerWidth - 56, initialLeft + deltaX));
-      const newBottom = Math.max(0, Math.min(window.innerHeight - 56, initialBottom - deltaY));
-
-      button.style.left = newLeft + 'px';
-      button.style.bottom = newBottom + 'px';
-      button.style.right = 'auto';
-    };
-
-    const endDrag = () => {
-      isDragging = false;
-      button.style.cursor = 'pointer';
-    };
-
-    button.addEventListener('mousedown', (e) => {
-      if (e.button === 0) { // 左键
-        e.preventDefault();
-        startDrag(e.clientX, e.clientY);
-
-        const handleMouseMove = (e) => drag(e.clientX, e.clientY);
-        const handleMouseUp = () => {
-          endDrag();
-          document.removeEventListener('mousemove', handleMouseMove);
-          document.removeEventListener('mouseup', handleMouseUp);
-        };
-
-        document.addEventListener('mousemove', handleMouseMove);
-        document.addEventListener('mouseup', handleMouseUp);
-      }
-    });
-
-    // 点击事件（拖拽不触发）
-    button.addEventListener('click', (e) => {
-      if (!isDragging) {
-        this.showDownloadPanel();
-      }
-    });
-
-    document.body.appendChild(button);
-  }
-
-  // 显示下载面板
-  showDownloadPanel() {
-    if (this.downloadPanel) {
-      this.downloadPanel.remove();
-    }
-
-    if (this.videoItems.length === 0) {
-      this.scanForVideos();
-    }
-
-    const panel = document.createElement('div');
-    panel.className = 'flow-downloader-panel';
-
-    const savedPrefix = localStorage.getItem('flow_download_prefix') || '';
-
-    panel.innerHTML = `
-      <div class="flow-downloader-header">
-        <h3>Flow批量下载器 - 找到 ${this.videoItems.length} 个视频</h3>
-        <button class="flow-downloader-close" id="flow-downloader-close">×</button>
-      </div>
-      <div class="flow-downloader-body">
-        <div class="flow-downloader-actions">
-          <button id="flow-select-all">全选</button>
-          <button id="flow-deselect-all">取消全选</button>
-          <input type="text" class="flow-batch-prefix-input" id="flow-batch-prefix" placeholder="批量前缀(可选)" value="${savedPrefix}">
-        </div>
-        <div id="flow-video-list"></div>
-      </div>
-      <div class="flow-downloader-footer">
-        <button class="flow-download-all-btn" id="flow-download-selected">下载选中的视频</button>
-      </div>
-    `;
-
-    document.body.appendChild(panel);
-    this.downloadPanel = panel;
-
-    this.renderVideoList();
-    this.setupDownloadPanelEvents();
-  }
-
-  // 渲染视频列表
-  renderVideoList() {
-    const list = this.downloadPanel?.querySelector('#flow-video-list');
-    if (!list) return;
-
-    list.innerHTML = this.videoItems.map((item, index) => `
-      <div class="flow-video-item" data-index="${index}">
-        <input type="checkbox" class="flow-video-checkbox" id="flow-check-${index}">
-        <div class="flow-video-preview">
-          ${item.posterUrl ? `<img src="${item.posterUrl}" alt="预览" style="width:100%;height:100%;object-fit:cover;">` : '<div>▶</div>'}
-        </div>
-        <div class="flow-video-info">
-          <input type="text" class="flow-video-name-input" value="${item.name}" placeholder="文件名">
-          <div class="flow-video-url">${item.videoUrl}</div>
-        </div>
-      </div>
-    `).join('');
-  }
-
-  // 设置下载面板事件
-  setupDownloadPanelEvents() {
-    const panel = this.downloadPanel;
-    if (!panel) return;
-
-    // 关闭按钮
-    panel.querySelector('#flow-downloader-close').addEventListener('click', () => {
-      panel.remove();
-      this.downloadPanel = null;
-    });
-
-    // 全选/取消全选
-    panel.querySelector('#flow-select-all').addEventListener('click', () => {
-      panel.querySelectorAll('.flow-video-checkbox').forEach(cb => cb.checked = true);
-    });
-
-    panel.querySelector('#flow-deselect-all').addEventListener('click', () => {
-      panel.querySelectorAll('.flow-video-checkbox').forEach(cb => cb.checked = false);
-    });
-
-    // 前缀输入
-    panel.querySelector('#flow-batch-prefix').addEventListener('input', (e) => {
-      localStorage.setItem('flow_download_prefix', e.target.value.trim());
-    });
-
-    // 下载按钮
-    panel.querySelector('#flow-download-selected').addEventListener('click', () => {
-      this.downloadSelectedVideos();
-    });
-
-    // 点击面板外部关闭
-    const handleOutsideClick = (e) => {
-      if (!panel.contains(e.target)) {
-        panel.remove();
-        this.downloadPanel = null;
-        document.removeEventListener('mousedown', handleOutsideClick);
-      }
-    };
-
-    setTimeout(() => {
-      document.addEventListener('mousedown', handleOutsideClick);
-    }, 100);
-  }
-
-  // 下载选中的视频（倒序编号）
-  async downloadSelectedVideos() {
-    if (!this.downloadPanel) return;
-
-    const checkboxes = this.downloadPanel.querySelectorAll('.flow-video-checkbox');
-    const nameInputs = this.downloadPanel.querySelectorAll('.flow-video-name-input');
-    const prefix = (this.downloadPanel.querySelector('#flow-batch-prefix')?.value || '').trim();
-
-    // 第一步：收集所有选中的视频
-    const selectedItems = [];
-    checkboxes.forEach((checkbox, index) => {
-      if (checkbox.checked) {
-        const item = this.videoItems[index];
-        const baseName = (nameInputs[index].value || item.name).replace(/\.+$/, '');
-        selectedItems.push({
-          item,
-          baseName,
-          originalIndex: index
-        });
-      }
-    });
-
-    if (selectedItems.length === 0) {
-      alert('请至少选择一个视频');
-      return;
-    }
-
-    // 第二步：按照倒序编号分配编号（总数 -> 1）
-    const totalSelected = selectedItems.length;
-    const downloadPromises = [];
-
-    selectedItems.forEach((selected, selectionIndex) => {
-      // 倒序编号：第1个选中 -> 编号最大(totalSelected)，最后一个 -> 编号1
-      const reverseNumber = totalSelected - selectionIndex;
-
-      // 构建文件名：编号-原始名称
-      const filename = `${prefix ? prefix + '_' : ''}${reverseNumber}-${selected.baseName}.mp4`;
-
-      this.log(`准备下载: ${filename} (选择顺序: ${selectionIndex + 1}/${totalSelected}, 倒序编号: ${reverseNumber})`, 'info');
-
-      downloadPromises.push(
-        chrome.runtime.sendMessage({
-          action: 'downloadVideo',
-          url: selected.item.videoUrl,
-          filename: filename
-        }).catch(error => {
-          console.error(`下载视频失败: ${filename}`, error);
-        })
-      );
-    });
-
-    // 第三步：开始下载
-    await Promise.all(downloadPromises);
-    alert(`已开始下载 ${totalSelected} 个视频（按倒序编号）`);
-    this.downloadPanel?.remove();
-    this.downloadPanel = null;
-  }
-
-  // ===============================
   // FLOATING UI WIDGET
   // ===============================
 
@@ -2963,185 +2403,6 @@ class FlowBatchContentScript {
               height: 70vh;
             }
           }
-
-          /* Flow批量下载器样式 */
-          .flow-batch-downloader-btn {
-            position: fixed !important;
-            bottom: 20px !important;
-            left: 20px !important;
-            width: 56px !important;
-            height: 56px !important;
-            border-radius: 50% !important;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
-            border: none !important;
-            color: white !important;
-            font-size: 20px !important;
-            cursor: pointer !important;
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4) !important;
-            z-index: 10000 !important;
-            transition: all 0.3s ease !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-          }
-
-          .flow-batch-downloader-btn:hover {
-            transform: scale(1.1) !important;
-            box-shadow: 0 6px 16px rgba(102, 126, 234, 0.6) !important;
-          }
-
-          .flow-downloader-panel {
-            position: fixed !important;
-            top: 50% !important;
-            left: 50% !important;
-            transform: translate(-50%, -50%) !important;
-            width: 600px !important;
-            max-width: 90vw !important;
-            max-height: 80vh !important;
-            background: white !important;
-            border-radius: 12px !important;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.15) !important;
-            z-index: 10001 !important;
-            overflow: hidden !important;
-          }
-
-          .flow-downloader-header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
-            color: white !important;
-            padding: 20px !important;
-            display: flex !important;
-            justify-content: space-between !important;
-            align-items: center !important;
-          }
-
-          .flow-downloader-header h3 {
-            margin: 0 !important;
-            font-size: 18px !important;
-          }
-
-          .flow-downloader-close {
-            background: none !important;
-            border: none !important;
-            color: white !important;
-            font-size: 24px !important;
-            cursor: pointer !important;
-            padding: 0 !important;
-            width: 30px !important;
-            height: 30px !important;
-            border-radius: 50% !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-          }
-
-          .flow-downloader-close:hover {
-            background: rgba(255,255,255,0.2) !important;
-          }
-
-          .flow-downloader-body {
-            padding: 20px !important;
-            max-height: 400px !important;
-            overflow-y: auto !important;
-          }
-
-          .flow-downloader-actions {
-            display: flex !important;
-            gap: 10px !important;
-            margin-bottom: 20px !important;
-            align-items: center !important;
-          }
-
-          .flow-downloader-actions button {
-            padding: 8px 16px !important;
-            border: 1px solid #ddd !important;
-            background: white !important;
-            border-radius: 6px !important;
-            cursor: pointer !important;
-            font-size: 14px !important;
-          }
-
-          .flow-downloader-actions button:hover {
-            background: #f5f5f5 !important;
-          }
-
-          .flow-batch-prefix-input {
-            padding: 8px 12px !important;
-            border: 1px solid #ddd !important;
-            border-radius: 6px !important;
-            font-size: 14px !important;
-            flex: 1 !important;
-          }
-
-          .flow-video-item {
-            display: flex !important;
-            align-items: center !important;
-            padding: 12px !important;
-            border: 1px solid #eee !important;
-            border-radius: 8px !important;
-            margin-bottom: 10px !important;
-            background: #fafafa !important;
-          }
-
-          .flow-video-item:hover {
-            background: #f0f0f0 !important;
-          }
-
-          .flow-video-checkbox {
-            margin-right: 12px !important;
-          }
-
-          .flow-video-preview {
-            width: 60px !important;
-            height: 40px !important;
-            margin-right: 12px !important;
-            border-radius: 4px !important;
-            object-fit: cover !important;
-            background: #000 !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            color: white !important;
-            font-size: 12px !important;
-          }
-
-          .flow-video-info {
-            flex: 1 !important;
-          }
-
-          .flow-video-name-input {
-            width: 100% !important;
-            padding: 6px 8px !important;
-            border: 1px solid #ddd !important;
-            border-radius: 4px !important;
-            font-size: 14px !important;
-            margin-bottom: 4px !important;
-          }
-
-          .flow-video-url {
-            font-size: 12px !important;
-            color: #666 !important;
-            word-break: break-all !important;
-          }
-
-          .flow-downloader-footer {
-            padding: 20px !important;
-            border-top: 1px solid #eee !important;
-            text-align: right !important;
-          }
-
-          .flow-download-all-btn {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
-            color: white !important;
-            border: none !important;
-            padding: 12px 24px !important;
-            border-radius: 6px !important;
-            cursor: pointer !important;
-            font-size: 16px !important;
-          }
-
-          .flow-download-all-btn:hover {
-            opacity: 0.9 !important;
-          }
         `;
         document.head.appendChild(style);
       }
@@ -3204,7 +2465,7 @@ class FlowBatchContentScript {
     if (this._updatingState) {
       await this._updatingState;
     }
-
+    
     this._updatingState = (async () => {
       try {
         const currentState = await this.loadQueueState() || {};
@@ -3219,13 +2480,13 @@ class FlowBatchContentScript {
         }).catch(() => {
           // Popup might be closed, ignore error
         });
-
+        
         return newState;
       } finally {
         this._updatingState = null;
       }
     })();
-
+    
     return this._updatingState;
   }
 
@@ -3319,28 +2580,15 @@ class FlowBatchContentScript {
       }
 
       if (!metadata.flowBatchTaskMetadata || !metadata.flowBatchTaskMetadata.promptList) {
-        this.log('Queue state found but metadata missing - clearing corrupted state', 'warning');
-        // 清除损坏的状态
-        await chrome.storage.local.remove(['flowBatchQueueState', 'flowBatchTaskMetadata']);
+        this.log('Queue state found but metadata missing', 'warning');
         return;
       }
 
       if (state.running && !state.paused) {
-        // CRITICAL FIX: Check if queue is too old (more than 30 minutes) - likely stuck
-        const queueAge = Date.now() - (state.lastUpdate || 0);
-        const isStaleQueue = queueAge > (30 * 60 * 1000); // 30 minutes
-
-        if (isStaleQueue) {
-          this.log('🧹 Detected stale queue state, clearing...', 'warning');
-          this.logToPopup('检测到过期的队列状态，已自动清除', 'warning');
-          await chrome.storage.local.remove(['flowBatchQueueState', 'flowBatchTaskMetadata']);
-          return;
-        }
-
         // CRITICAL FIX: Only auto-resume if queue is actually not completed
         const isQueueActive = state.currentIndex < state.totalTasks;
         const hasPendingTasks = (state.pendingTasks || 0) > 0;
-
+        
         if (isQueueActive || hasPendingTasks) {
           this.log('🔄 Auto-resuming interrupted queue', 'warning');
           this.logToPopup('检测到未完成队列，自动恢复处理', 'warning');
@@ -3348,28 +2596,23 @@ class FlowBatchContentScript {
           this.metadata = metadata.flowBatchTaskMetadata;
           this.queueRunning = true;
           this.currentTaskPointer = state.currentIndex || 0;
-
+          
           // CRITICAL FIX: Ensure correct mode before resuming
-          try {
-            await this.ensureCorrectMode(this.metadata.flowMode);
-          } catch (error) {
-            this.log(`Mode check failed during auto-resume: ${error.message}`, 'warning');
-            // Continue anyway, mode might already be correct
-          }
-
+          
+          
           // Start queue processing (don't await, let it run in background)
           this.processQueue().catch(error => {
             this.log(`Auto-resume queue processing error: ${error.message}`, 'error');
             this.queueRunning = false;
-            this.updateQueueState({ running: false }).catch(() => { });
+            this.updateQueueState({ running: false }).catch(() => {});
           });
         } else {
           // Queue marked as running but actually completed, reset it
           this.log('Queue state shows running but is actually completed, resetting...', 'info');
-          await this.updateQueueState({
-            running: false,
-            paused: false,
-            pendingTasks: 0
+          await this.updateQueueState({ 
+            running: false, 
+            paused: false, 
+            pendingTasks: 0 
           });
           this.queueRunning = false;
         }
