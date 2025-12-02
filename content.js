@@ -658,12 +658,12 @@ class FlowBatchContentScript {
         return;
       }
 
-      this.log(`任务 ${taskIndex + 1} 视频生成完成，开始下载...`, 'info');
-      this.logToPopup(`📥 任务 ${taskIndex + 1} 开始下载...`, 'info');
-      await this.downloadVideo(downloadUrl, taskIndex, prompt);
+      this.log(`任务 ${taskIndex + 1} 视频生成完成`, 'info');
+      this.logToPopup(`✅ 任务 ${taskIndex + 1} 生成完成（未自动下载）`, 'info');
+      // await this.downloadVideo(downloadUrl, taskIndex, prompt);
 
-      this.log(`✅ 任务 ${taskIndex + 1} 完成并已下载`, 'success');
-      this.logToPopup(`✅ 任务 ${taskIndex + 1} 完成并已下载`, 'success');
+      this.log(`✅ 任务 ${taskIndex + 1} 完成`, 'success');
+      this.logToPopup(`✅ 任务 ${taskIndex + 1} 生成完成`, 'success');
 
       // CRITICAL FIX: Atomic update of pendingTasks with pause check
       const finalState = await this.loadQueueState();
@@ -2238,17 +2238,17 @@ class FlowBatchContentScript {
       this.log(`任务 ${taskIndex + 1} 视频生成完成，开始下载...`, 'info');
       this.logToPopup(`📥 任务 ${taskIndex + 1} 开始下载...`, 'info');
 
-      // CRITICAL FIX: Wait for download to complete before updating success count
+      // 自动下载已禁用
       try {
-        await this.downloadVideo(downloadUrl, taskIndex, prompt);
-        this.log(`✅ 任务 ${taskIndex + 1} 下载请求已发送`, 'success');
+        // await this.downloadVideo(downloadUrl, taskIndex, prompt);
+        this.log(`⚠️ 任务 ${taskIndex + 1} 自动下载已禁用`, 'info');
       } catch (downloadError) {
         this.log(`⚠️ 任务 ${taskIndex + 1} 下载请求失败: ${downloadError.message}`, 'warning');
         // Continue anyway, download might still succeed
       }
 
-      this.log(`✅ 任务 ${taskIndex + 1} 完成并已下载`, 'success');
-      this.logToPopup(`✅ 任务 ${taskIndex + 1} 完成并已下载`, 'success');
+      this.log(`✅ 任务 ${taskIndex + 1} 完成（未自动下载）`, 'success');
+      this.logToPopup(`✅ 任务 ${taskIndex + 1} 生成完成`, 'success');
 
       // CRITICAL FIX: Atomic update of pendingTasks and successCount
       // Only update successCount if video was successfully generated and download was requested
