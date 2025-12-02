@@ -2936,8 +2936,6 @@ class FlowBatchContentScript {
     const panel = document.createElement('div');
     panel.className = 'flow-downloader-panel';
 
-    const savedPrefix = localStorage.getItem('flow_download_prefix') || '';
-
     panel.innerHTML = `
       <div class="flow-downloader-header">
         <h3>Flow批量下载器 - 找到 ${this.videoItems.length} 个视频</h3>
@@ -2947,7 +2945,6 @@ class FlowBatchContentScript {
         <div class="flow-downloader-actions">
           <button id="flow-select-all">全选</button>
           <button id="flow-deselect-all">取消全选</button>
-          <input type="text" class="flow-batch-prefix-input" id="flow-batch-prefix" placeholder="批量前缀(可选)" value="${savedPrefix}">
         </div>
         <div id="flow-video-list"></div>
       </div>
@@ -3002,11 +2999,6 @@ class FlowBatchContentScript {
       panel.querySelectorAll('.flow-video-checkbox').forEach(cb => cb.checked = false);
     });
 
-    // 前缀输入
-    panel.querySelector('#flow-batch-prefix').addEventListener('input', (e) => {
-      localStorage.setItem('flow_download_prefix', e.target.value.trim());
-    });
-
     // 下载按钮
     panel.querySelector('#flow-download-selected').addEventListener('click', () => {
       this.downloadSelectedVideos();
@@ -3026,13 +3018,12 @@ class FlowBatchContentScript {
     }, 100);
   }
 
-  // 下载选中的视频（倒序编号）
+  // 下载选中的视频（按提示词分组）
   async downloadSelectedVideos() {
     if (!this.downloadPanel) return;
 
     const checkboxes = this.downloadPanel.querySelectorAll('.flow-video-checkbox');
     const nameInputs = this.downloadPanel.querySelectorAll('.flow-video-name-input');
-    const prefix = (this.downloadPanel.querySelector('#flow-batch-prefix')?.value || '').trim();
 
     // 第一步：收集所有选中的视频
     const selectedItems = [];
@@ -3053,33 +3044,59 @@ class FlowBatchContentScript {
       return;
     }
 
-    // 第二步：按照倒序编号分配编号（总数 -> 1）
-    const totalSelected = selectedItems.length;
-    const downloadPromises = [];
+    // 第二步：按提示词分组
+    const promptGroups = {};
+    selectedItems.forEach((selected) => {
+      const prompt = selected.item.fullPrompt || '';
+      const key = prompt.substring(0, 50); // 使用前50个字符作为分组键
 
-    selectedItems.forEach((selected, selectionIndex) => {
-      // 倒序编号：第1个选中 -> 编号最大(totalSelected)，最后一个 -> 编号1
-      const reverseNumber = totalSelected - selectionIndex;
-
-      // 构建文件名：编号-原始名称
-      const filename = `${prefix ? prefix + '_' : ''}${reverseNumber}-${selected.baseName}.mp4`;
-
-      this.log(`准备下载: ${filename} (选择顺序: ${selectionIndex + 1}/${totalSelected}, 倒序编号: ${reverseNumber})`, 'info');
-
-      downloadPromises.push(
-        chrome.runtime.sendMessage({
-          action: 'downloadVideo',
-          url: selected.item.videoUrl,
-          filename: filename
-        }).catch(error => {
-          console.error(`下载视频失败: ${filename}`, error);
-        })
-      );
+      if (!promptGroups[key]) {
+        promptGroups[key] = [];
+      }
+      promptGroups[key].push(selected);
     });
 
-    // 第三步：开始下载
+    // 第三步：为每个组生成文件名并下载
+    const downloadPromises = [];
+    let totalDownloaded = 0;
+
+    Object.values(promptGroups).forEach((group) => {
+      group.forEach((selected, groupIndex) => {
+        let filename = selected.baseName;
+
+        // 如果组内有多个视频，添加序号
+        if (group.length > 1) {
+          if (groupIndex === 0) {
+            // 第一个文件不加序号
+            filename = `${selected.baseName}.mp4`;
+          } else {
+            // 后续文件加序号，格式：文件名 (n).mp4
+            filename = `${selected.baseName} (${groupIndex}).mp4`;
+          }
+        } else {
+          // 只有一个视频
+          filename = `${selected.baseName}.mp4`;
+        }
+
+        this.log(`准备下载: ${filename} (提示词组第${groupIndex + 1}/${group.length}个)`, 'info');
+
+        downloadPromises.push(
+          chrome.runtime.sendMessage({
+            action: 'downloadVideo',
+            url: selected.item.videoUrl,
+            filename: filename
+          }).catch(error => {
+            console.error(`下载视频失败: ${filename}`, error);
+          })
+        );
+
+        totalDownloaded++;
+      });
+    });
+
+    // 第四步：开始下载
     await Promise.all(downloadPromises);
-    alert(`已开始下载 ${totalSelected} 个视频（按倒序编号）`);
+    alert(`已开始下载 ${totalDownloaded} 个视频（按提示词分组）`);
     this.downloadPanel?.remove();
     this.downloadPanel = null;
   }
@@ -3299,14 +3316,6 @@ class FlowBatchContentScript {
 
           .flow-downloader-actions button:hover {
             background: #f5f5f5 !important;
-          }
-
-          .flow-batch-prefix-input {
-            padding: 8px 12px !important;
-            border: 1px solid #ddd !important;
-            border-radius: 6px !important;
-            font-size: 14px !important;
-            flex: 1 !important;
           }
 
           .flow-video-item {
