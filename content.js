@@ -2670,9 +2670,17 @@ class FlowBatchContentScript {
     this.videoUrlSet.clear();
 
     const videos = document.querySelectorAll('video');
-    videos.forEach(video => this.addVideoItem(video));
+    this.log(`开始扫描 ${videos.length} 个视频元素`, 'info');
 
-    this.log(`扫描到 ${this.videoItems.length} 个视频`, 'info');
+    let addedCount = 0;
+    videos.forEach((video, index) => {
+      if (this.addVideoItem(video)) {
+        addedCount++;
+        this.log(`视频 ${addedCount}: 提示词前缀 = ${this.videoItems[this.videoItems.length - 1].name}`, 'info');
+      }
+    });
+
+    this.log(`成功扫描到 ${this.videoItems.length} 个视频（共 ${videos.length} 个元素）`, 'info');
   }
 
   // 添加视频项
@@ -2691,6 +2699,11 @@ class FlowBatchContentScript {
     if (this.videoUrlSet.has(key)) return false;
 
     const posterUrl = videoEl.poster || '';
+
+    // 提取对应的提示词
+    const prompt = this.extractPromptForVideo(videoEl);
+    const promptPrefix = this.generatePromptPrefix(prompt);
+
     const item = {
       index: this.videoItems.length + 1,
       key,
@@ -2698,7 +2711,8 @@ class FlowBatchContentScript {
       posterUrl,
       element: videoEl,
       selected: false,
-      name: `flow_video_${this.videoItems.length + 1}`
+      name: promptPrefix || `flow_video_${this.videoItems.length + 1}`,
+      fullPrompt: prompt
     };
 
     this.videoItems.push(item);
@@ -2714,6 +2728,104 @@ class FlowBatchContentScript {
     } catch {
       return String(url).split('#')[0].split('?')[0];
     }
+  }
+
+  // 提取视频对应的提示词
+  extractPromptForVideo(videoEl) {
+    try {
+      // 方法1：通过DOM结构向上查找提示词容器
+      let container = videoEl.closest('div[data-index]');
+      if (container) {
+        // 在同一个data-index容器内查找提示词
+        const promptEl = container.querySelector('div[class*="eVxyTT"]');
+        if (promptEl) {
+          let prompt = promptEl.textContent.trim();
+          // 清理提示词：移除开头的数字序号
+          prompt = prompt.replace(/^\d+\s+/, '');
+          return prompt;
+        }
+      }
+
+      // 方法2：使用XPath查找最近的提示词元素
+      const videoRect = videoEl.getBoundingClientRect();
+      const allPrompts = document.querySelectorAll('div[class*="eVxyTT"]');
+
+      let closestPrompt = null;
+      let minDistance = Infinity;
+
+      allPrompts.forEach(promptEl => {
+        const promptRect = promptEl.getBoundingClientRect();
+        const distance = Math.abs(videoRect.top - promptRect.top) +
+                        Math.abs(videoRect.left - promptRect.left);
+
+        if (distance < minDistance && distance < 500) { // 500px阈值
+          minDistance = distance;
+          closestPrompt = promptEl;
+        }
+      });
+
+      if (closestPrompt) {
+        let prompt = closestPrompt.textContent.trim();
+        prompt = prompt.replace(/^\d+\s+/, '');
+        return prompt;
+      }
+
+      // 方法3：查找包含特定关键词的提示词
+      const keywords = ['镜头', '男人', '女人', '孩子', '声音', '音效'];
+      for (const keyword of keywords) {
+        const xpath = `//div[contains(@class,'eVxyTT')][contains(text(),'${keyword}')]`;
+        const result = document.evaluate(
+          xpath,
+          document,
+          null,
+          XPathResult.FIRST_ORDERED_NODE_TYPE,
+          null
+        ).singleNodeValue;
+
+        if (result) {
+          let prompt = result.textContent.trim();
+          prompt = prompt.replace(/^\d+\s+/, '');
+          return prompt;
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.error('提取提示词失败:', error);
+      return null;
+    }
+  }
+
+  // 生成提示词前缀（取前10个有效字符）
+  generatePromptPrefix(prompt) {
+    if (!prompt) return null;
+
+    // 移除特殊符号和空格，保留中英文和数字
+    const cleaned = prompt
+      .replace(/[\/:*?"<>|]/g, '') // 移除Windows文件名不允许的字符
+      .replace(/\s+/g, ' ')        // 多个空格合并为一个
+      .replace(/^\d+\s*/, '')      // 移除开头的数字
+      .trim();
+
+    if (!cleaned) return null;
+
+    // 取前10个字符，如果遇到标点符号则提前截断
+    let prefix = '';
+    for (let i = 0; i < Math.min(10, cleaned.length); i++) {
+      const char = cleaned[i];
+      // 遇到逗号、句号等标点符号时停止
+      if (/[，。！？；：,.!?;:]/.test(char)) {
+        break;
+      }
+      prefix += char;
+    }
+
+    // 如果前缀为空或太短，使用前5个字符
+    if (prefix.length < 3 && cleaned.length >= 5) {
+      prefix = cleaned.substring(0, 5);
+    }
+
+    return prefix || null;
   }
 
   // 启动视频观察器
@@ -2865,7 +2977,7 @@ class FlowBatchContentScript {
           ${item.posterUrl ? `<img src="${item.posterUrl}" alt="预览" style="width:100%;height:100%;object-fit:cover;">` : '<div>▶</div>'}
         </div>
         <div class="flow-video-info">
-          <input type="text" class="flow-video-name-input" value="${item.name}" placeholder="文件名">
+          <input type="text" class="flow-video-name-input" value="${item.name}" placeholder="文件名" title="提示词: ${item.fullPrompt || '未找到'}">
           <div class="flow-video-url">${item.videoUrl}</div>
         </div>
       </div>
