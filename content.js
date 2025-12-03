@@ -2663,7 +2663,7 @@ class FlowBatchContentScript {
     this.scanForVideos();
     this.startVideoObserver();
     this.createDownloadButton();
-    this.createFixedToolbar();
+    // this.createFixedToolbar(); // 去掉固定工具栏
   }
 
   // 扫描页面中的视频
