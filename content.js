@@ -426,6 +426,9 @@ class FlowBatchContentScript {
             const newRetryCount = currentRetryCount + 1;
             const remainingRetries = maxRetries - newRetryCount;
 
+            // 🔴 关键修复：重试时减少pendingTasks，防止队列状态异常
+            state.pendingTasks = Math.max(0, (state.pendingTasks || 0) - 1);
+
             // Update retry counter
             state.retryCounters[currentTaskIndex] = newRetryCount;
             await this.updateQueueState(state);
@@ -2106,6 +2109,15 @@ class FlowBatchContentScript {
 
           // Check if generation failed
           if (statusText.includes('Failed Generation')) {
+            // 🔴 关键修复：验证视频是否实际存在，防止误判
+            const video = targetCard.querySelector('video');
+            if (video && video.src && !video.src.includes('blob:null')) {
+              this.log(`⚠️ 检测到失败文本但视频存在，可能是误判，继续等待`, 'warning');
+              await this.sleep(3000); // 等待3秒后重新检测
+              continue; // 跳过失败判断，继续等待循环
+            }
+
+            // 确认视频真的不存在，才抛出重试异常
             this.log(`❌ 任务 ${targetIndex + 1} 生成失败，触发重试`, 'error');
             this.logToPopup(`❌ 任务 ${targetIndex + 1} 生成失败，将自动重试`, 'error');
             throw new RetryTaskError(`Video generation failed for task ${targetIndex + 1}`);
