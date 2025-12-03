@@ -1694,7 +1694,7 @@ class FlowBatchContentScript {
     await this.waitForQueueCapacity('submit');
 
     const startTime = Date.now();
-    const maxWait = 20000; // 20s max wait for button availability
+    const maxWait = 30000; // 30s max wait for button availability
     let submitButton = null;
 
     while (Date.now() - startTime < maxWait) {
