@@ -2658,12 +2658,10 @@ class FlowBatchContentScript {
     this.videoUrlSet = new Set();
     this.downloadPanel = null;
     this.downloadObserver = null;
-    this.fixedToolbar = null;
 
     this.scanForVideos();
     this.startVideoObserver();
     this.createDownloadButton();
-    // this.createFixedToolbar(); // 去掉固定工具栏
   }
 
   // 扫描页面中的视频
@@ -2684,9 +2682,7 @@ class FlowBatchContentScript {
 
     this.log(`成功扫描到 ${this.videoItems.length} 个视频（共 ${videos.length} 个元素）`, 'info');
 
-    // 实时更新视频数量
-    this.updateVideoCount();
-  }
+    }
 
   // 添加视频项
   addVideoItem(videoEl) {
@@ -2852,8 +2848,7 @@ class FlowBatchContentScript {
 
       if (added > 0) {
         this.renderVideoList();
-        this.updateVideoCount(); // 更新视频数量
-      }
+        }
     });
 
     this.downloadObserver.observe(document.body, { childList: true, subtree: true });
@@ -2929,124 +2924,8 @@ class FlowBatchContentScript {
     document.body.appendChild(button);
   }
 
-  // 创建固定工具栏
-  createFixedToolbar() {
-    if (document.getElementById('flow-batch-toolbar')) return;
-
-    const toolbar = document.createElement('div');
-    toolbar.id = 'flow-batch-toolbar';
-    toolbar.className = 'flow-batch-toolbar';
-    toolbar.innerHTML = `
-      <span class="flow-toolbar-info">找到 <span id="flow-video-count">0</span> 个视频</span>
-      <button id="flow-toolbar-select-all">全选</button>
-      <button id="flow-toolbar-deselect-all">取消全选</button>
-      <button id="flow-toolbar-download">下载选中</button>
-    `;
-
-    // 添加样式
-    const style = document.createElement('style');
-    style.textContent = `
-      .flow-batch-toolbar {
-        position: fixed;
-        top: 20px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: rgba(0, 0, 0, 0.85);
-        color: white;
-        padding: 10px 20px;
-        border-radius: 25px;
-        display: flex;
-        align-items: center;
-        gap: 15px;
-        z-index: 10000;
-        font-size: 14px;
-        backdrop-filter: blur(10px);
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-        transition: opacity 0.3s ease;
-      }
-
-      .flow-batch-toolbar:hover {
-        background: rgba(0, 0, 0, 0.9);
-      }
-
-      .flow-toolbar-info {
-        margin-right: 10px;
-        color: #ddd;
-      }
-
-      .flow-batch-toolbar button {
-        background: rgba(255, 255, 255, 0.2);
-        color: white;
-        border: 1px solid rgba(255, 255, 255, 0.3);
-        padding: 6px 15px;
-        border-radius: 15px;
-        cursor: pointer;
-        font-size: 13px;
-        transition: all 0.2s ease;
-      }
-
-      .flow-batch-toolbar button:hover {
-        background: rgba(255, 255, 255, 0.3);
-        border-color: rgba(255, 255, 255, 0.5);
-      }
-
-      .flow-batch-toolbar button:active {
-        transform: scale(0.95);
-      }
-
-      #flow-video-count {
-        color: #4A90E2;
-        font-weight: bold;
-      }
-    `;
-    document.head.appendChild(style);
-
-    // 添加事件监听
-    toolbar.querySelector('#flow-toolbar-select-all').addEventListener('click', () => {
-      document.querySelectorAll('.flow-video-checkbox').forEach(cb => cb.checked = true);
-    });
-
-    toolbar.querySelector('#flow-toolbar-deselect-all').addEventListener('click', () => {
-      document.querySelectorAll('.flow-video-checkbox').forEach(cb => cb.checked = false);
-    });
-
-    toolbar.querySelector('#flow-toolbar-download').addEventListener('click', () => {
-      this.downloadSelectedVideos();
-    });
-
-    // 点击外部时隐藏，点击下载按钮时显示
-    let hideTimeout;
-    const showToolbar = () => {
-      clearTimeout(hideTimeout);
-      toolbar.style.opacity = '1';
-    };
-
-    const hideToolbar = () => {
-      hideTimeout = setTimeout(() => {
-        toolbar.style.opacity = '0.3';
-      }, 3000);
-    };
-
-    toolbar.addEventListener('mouseenter', showToolbar);
-    toolbar.addEventListener('mouseleave', hideToolbar);
-
-    // 监听下载按钮点击
-    document.getElementById('flow-batch-downloader-btn')?.addEventListener('click', showToolbar);
-
-    document.body.appendChild(toolbar);
-
-    // 初始更新数量
-    this.updateVideoCount();
-  }
-
-  // 更新视频数量
-  updateVideoCount() {
-    const countEl = document.getElementById('flow-video-count');
-    if (countEl) {
-      countEl.textContent = this.videoItems.length;
-    }
-  }
-
+  
+  
   // 显示下载面板
   showDownloadPanel() {
     if (this.downloadPanel) {
