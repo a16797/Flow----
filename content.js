@@ -2944,11 +2944,12 @@ class FlowBatchContentScript {
         <h3>Flow批量下载器 - 找到 ${this.videoItems.length} 个视频</h3>
         <button class="flow-downloader-close" id="flow-downloader-close">×</button>
       </div>
+      <div class="flow-downloader-actions-bar">
+        <button id="flow-select-all">全选</button>
+        <button id="flow-deselect-all">取消全选</button>
+        <span class="flow-selection-info">已选择 0 个视频</span>
+      </div>
       <div class="flow-downloader-body">
-        <div class="flow-downloader-actions">
-          <button id="flow-select-all">全选</button>
-          <button id="flow-deselect-all">取消全选</button>
-        </div>
         <div id="flow-video-list"></div>
       </div>
       <div class="flow-downloader-footer">
@@ -2976,7 +2977,6 @@ class FlowBatchContentScript {
         </div>
         <div class="flow-video-info">
           <input type="text" class="flow-video-name-input" value="${item.name}" placeholder="文件名" title="提示词: ${item.fullPrompt || '未找到'}">
-          <div class="flow-video-url">${item.videoUrl}</div>
         </div>
       </div>
     `).join('');
@@ -3020,6 +3020,20 @@ class FlowBatchContentScript {
   }
 
   // 设置下载面板事件
+  // 更新选择计数显示
+  updateSelectionInfo() {
+    const panel = this.downloadPanel;
+    if (!panel) return;
+
+    const checkboxes = panel.querySelectorAll('.flow-video-checkbox');
+    const checkedCount = Array.from(checkboxes).filter(cb => cb.checked).length;
+    const selectionInfo = panel.querySelector('.flow-selection-info');
+
+    if (selectionInfo) {
+      selectionInfo.textContent = `已选择 ${checkedCount} 个视频`;
+    }
+  }
+
   setupDownloadPanelEvents() {
     const panel = this.downloadPanel;
     if (!panel) return;
@@ -3033,15 +3047,33 @@ class FlowBatchContentScript {
     // 全选/取消全选
     panel.querySelector('#flow-select-all').addEventListener('click', () => {
       panel.querySelectorAll('.flow-video-checkbox').forEach(cb => cb.checked = true);
+      this.updateSelectionInfo();
     });
 
     panel.querySelector('#flow-deselect-all').addEventListener('click', () => {
       panel.querySelectorAll('.flow-video-checkbox').forEach(cb => cb.checked = false);
+      this.updateSelectionInfo();
     });
 
     // 下载按钮
     panel.querySelector('#flow-download-selected').addEventListener('click', () => {
       this.downloadSelectedVideos();
+    });
+
+    // 为每个复选框添加事件监听器，实时更新选择计数
+    panel.querySelectorAll('.flow-video-checkbox').forEach(checkbox => {
+      checkbox.addEventListener('change', () => {
+        this.updateSelectionInfo();
+      });
+    });
+
+    // 添加快捷键支持 (Ctrl+A 全选)
+    panel.addEventListener('keydown', (e) => {
+      if (e.ctrlKey && e.key === 'a') {
+        e.preventDefault();
+        panel.querySelectorAll('.flow-video-checkbox').forEach(cb => cb.checked = true);
+        this.updateSelectionInfo();
+      }
     });
 
     // 点击面板外部关闭
@@ -3056,6 +3088,9 @@ class FlowBatchContentScript {
     setTimeout(() => {
       document.addEventListener('mousedown', handleOutsideClick);
     }, 100);
+
+    // 初始化选择计数显示
+    this.updateSelectionInfo();
   }
 
   // 下载选中的视频（按提示词分组）
@@ -3333,8 +3368,8 @@ class FlowBatchContentScript {
           }
 
           .flow-downloader-body {
-            padding: 20px !important;
-            max-height: 400px !important;
+            padding: 0 20px 20px 20px !important; /* 调整padding，为操作栏留出空间 */
+            max-height: 350px !important; /* 调整高度，为操作栏留出空间 */
             overflow-y: auto !important;
           }
 
@@ -3361,11 +3396,31 @@ class FlowBatchContentScript {
           .flow-video-item {
             display: flex !important;
             align-items: center !important;
-            padding: 12px !important;
+            padding: 15px !important;
             border: 1px solid #eee !important;
             border-radius: 8px !important;
             margin-bottom: 10px !important;
             background: #fafafa !important;
+            min-height: 80px; /* 配合更大的缩略图调整最小高度 */
+          }
+
+          .flow-downloader-actions-bar {
+            position: sticky;
+            top: 0;
+            background: white;
+            padding: 15px 20px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            z-index: 10;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+          }
+
+          .flow-selection-info {
+            margin-left: auto;
+            color: #666;
+            font-size: 14px;
           }
 
           .flow-video-item:hover {
@@ -3377,17 +3432,17 @@ class FlowBatchContentScript {
           }
 
           .flow-video-preview {
-            width: 60px !important;
-            height: 40px !important;
-            margin-right: 12px !important;
-            border-radius: 4px !important;
+            width: 120px !important;  /* 从60px增大到120px */
+            height: 80px !important;  /* 从40px增大到80px */
+            margin-right: 15px !important;
+            border-radius: 6px !important;
             object-fit: cover !important;
             background: #000 !important;
             display: flex !important;
             align-items: center !important;
             justify-content: center !important;
             color: white !important;
-            font-size: 12px !important;
+            font-size: 14px !important;
           }
 
           .flow-video-info {
@@ -3403,12 +3458,7 @@ class FlowBatchContentScript {
             margin-bottom: 4px !important;
           }
 
-          .flow-video-url {
-            font-size: 12px !important;
-            color: #666 !important;
-            word-break: break-all !important;
-          }
-
+    
           .flow-downloader-footer {
             padding: 20px !important;
             border-top: 1px solid #eee !important;
